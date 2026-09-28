@@ -1,0 +1,22 @@
+{
+  "name": "somapel-sdr",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agente SDR da Somapel Embalagens para WhatsApp",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env --no-warnings src/cloud-api.js",
+    "baileys": "node --env-file=.env --no-warnings src/index.js",
+    "chat": "node --env-file=.env --no-warnings src/cli-chat.js",
+    "simular": "node --env-file=.env --no-warnings src/simular.js",
+    "leads": "node --env-file=.env --no-warnings src/cli-leads.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "link-preview-js": "^3.2.0",
+    "openai": "^7.15.0",
+    "pino": "^10.3.1",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

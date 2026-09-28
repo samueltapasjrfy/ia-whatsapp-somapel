@@ -1,0 +1,127 @@
+// Núcleo de atendimento, independente do canal (Baileys ou Cloud API da Meta).
+// O canal só precisa saber enviar texto/imagem/documento; a lógica de buffer,
+// "digitando", pausa por humano e notificação da vendedora fica aqui.
+import { formatHandoff, leadVCard, runAgent } from './agent.js';
+import { brVariants, config, formatBR } from './config.js';
+import { addMessage, getLead, upsertLead } from './db.js';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * @param {object} channel
+ *  - sendText(to, texto)
+ *  - sendImage(to, { path, caption })
+ *  - sendDocument(to, { path, fileName })
+ *  - sendContact?(to, vcard)        opcional
+ *  - markRead?(item)                opcional
+ *  - typing?(to, ligado)            opcional
+ *  - sellerTarget?(numero)          converte número em destino do canal
+ */
+export function createConversation(channel, log = console.log) {
+  const chats = new Map(); // leadId -> { pending, timer, running }
+
+  async function notifySellers(text, lead) {
+    if (!config.sellerNumbers.length) {
+      log(`📣 (SELLER_WHATSAPP não configurado) notificação:\n${text}`);
+      return;
+    }
+    let enviados = 0;
+    for (const n of config.sellerNumbers) {
+      try {
+        const to = channel.sellerTarget ? await channel.sellerTarget(n) : n;
+        await channel.sendText(to, text);
+        if (lead?.phone && channel.sendContact) await channel.sendContact(to, leadVCard(lead));
+        enviados++;
+      } catch (err) {
+        log(`⚠️  falha ao notificar ${config.sellerName} (${formatBR(n)}):`, err.message);
+      }
+    }
+    if (enviados) log(`📣 ${config.sellerName} notificada (${config.sellerNumbers.map(formatBR).join(', ')})`);
+    else log(`❌ NÃO foi possível avisar ${config.sellerName} — lead aguardando atendimento!`);
+  }
+
+  function isAllowed(phone) {
+    if (config.replyToAll) return true;
+    const allowed = new Set(config.allowedNumbers.flatMap(brVariants));
+    return brVariants(phone).some((v) => allowed.has(v));
+  }
+
+  /**
+   * Registra a mensagem do lead e agenda a resposta (aguardando mensagens picadas).
+   * @param {{ leadId, to, phone, pushName, text, images?, raw? }} msg
+   */
+  function onIncoming({ leadId, to, phone, pushName, text, images = [], raw }) {
+    const lead = upsertLead(leadId, { phone, pushName });
+    log(`📩 ${lead.push_name || formatBR(phone)}: ${text}`);
+    addMessage(leadId, 'user', text);
+
+    if (lead.paused_until > Date.now()) {
+      log(`⏸️  ${formatBR(phone)} em atendimento humano — bot não responde`);
+      return;
+    }
+    const chat = chats.get(leadId) || { pending: [], timer: null, running: false };
+    chats.set(leadId, chat);
+    chat.pending.push({ images, raw, to });
+    clearTimeout(chat.timer);
+    chat.timer = setTimeout(() => flush(leadId), config.bufferSeconds * 1000);
+  }
+
+  async function flush(leadId) {
+    const chat = chats.get(leadId);
+    if (!chat || chat.running || !chat.pending.length) return;
+    chat.running = true;
+    const batch = chat.pending.splice(0);
+    const to = batch.at(-1).to;
+
+    try {
+      if (channel.markRead) for (const b of batch) await channel.markRead(b.raw).catch(() => {});
+      await channel.typing?.(to, true).catch(() => {});
+
+      const started = Date.now();
+      const images = batch.flatMap((b) => b.images);
+      let result;
+      try {
+        result = await runAgent(leadId, { images });
+      } catch (err) {
+        log('⚠️  erro na OpenAI, tentando de novo:', err.message);
+        await sleep(2000);
+        result = await runAgent(leadId, { images });
+      }
+
+      const { replies, attachments, handoff, updates } = result;
+      for (let i = 0; i < replies.length; i++) {
+        const espera = Math.min(1500 + replies[i].length * 30, 7000) - (i === 0 ? Date.now() - started : 0);
+        await channel.typing?.(to, true).catch(() => {});
+        if (espera > 0) await sleep(espera);
+        await channel.sendText(to, replies[i]);
+        log(`🤖 ${config.agentName} → ${getLead(leadId).phone}: ${replies[i].replace(/\n/g, ' ⏎ ')}`);
+      }
+      for (const a of attachments) {
+        try {
+          await sleep(800);
+          if (a.kind === 'document') await channel.sendDocument(to, a);
+          else if (a.kind === 'image') await channel.sendImage(to, a);
+          log(`📎 enviado ${a.kind}: ${a.fileName || a.produto}`);
+        } catch (err) {
+          log(`⚠️  falha ao enviar ${a.kind}:`, err.message);
+        }
+      }
+      await channel.typing?.(to, false).catch(() => {});
+
+      if (handoff) await notifySellers(formatHandoff(handoff), handoff.lead);
+      for (const u of updates) await notifySellers(u);
+
+      const l = getLead(leadId);
+      log(`📊 ${l.phone}: score ${l.score} (${l.temperature}) · ${l.stage}`);
+    } catch (err) {
+      log('❌ falha ao responder:', err);
+      await channel.sendText(to, 'Opa, tive uma instabilidade aqui 😅 Já já te respondo!').catch(() => {});
+      await notifySellers(`⚠️ O agente falhou ao responder ${getLead(leadId)?.phone}. Verifique o chat.`);
+    } finally {
+      chat.running = false;
+      if (chat.pending.length) chat.timer = setTimeout(() => flush(leadId), 1500);
+    }
+  }
+
+  return { onIncoming, notifySellers, isAllowed };
+}
