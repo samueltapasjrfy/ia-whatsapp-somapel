@@ -38,6 +38,9 @@ Baileys / WhatsApp Web ───────┘                        │
 - **Trava de segurança:** com `ALLOWED_NUMBERS` preenchido, o agente só responde esses números.
   Para produção, `REPLY_TO_ALL=true`.
 
+📄 **[DEPLOY.md](DEPLOY.md)** — instalar e operar numa máquina nova (env, token da Meta, webhook, pm2).
+📄 **[ARQUITETURA.md](ARQUITETURA.md)** — como o código se organiza, schema do banco e pontos de integração.
+
 ## Rodando
 
 Requisitos: Node 22+. Copie `.env.example` para `.env` e preencha.
