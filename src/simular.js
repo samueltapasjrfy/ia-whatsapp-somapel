@@ -44,12 +44,12 @@ const only = process.argv[2];
 for (const [nome, falas] of Object.entries(CENARIOS)) {
   if (only && nome !== only) continue;
   const id = `sim:${nome}`;
-  resetLead(id);
-  upsertLead(id, { phone: '5531900000000', pushName: 'Lead Simulado' });
+  await resetLead(id);
+  await upsertLead(id, { phone: '5531900000000', pushName: 'Lead Simulado' });
   console.log(`\n\x1b[1m════════ ${nome} ════════\x1b[0m`);
   for (const fala of falas) {
     console.log(`\x1b[36m👤 ${fala}\x1b[0m`);
-    addMessage(id, 'user', fala);
+    await addMessage(id, 'user', fala);
     const t0 = Date.now();
     const { replies, attachments, handoff, updates } = await runAgent(id);
     console.log(`\x1b[90m   (${((Date.now() - t0) / 1000).toFixed(1)}s)\x1b[0m`);
@@ -58,6 +58,6 @@ for (const [nome, falas] of Object.entries(CENARIOS)) {
     if (handoff) console.log(`\x1b[35m${formatHandoff(handoff)}\x1b[0m`);
     for (const u of updates) console.log(`\x1b[35m${u}\x1b[0m`);
   }
-  const l = getLead(id);
+  const l = await getLead(id);
   console.log(`\x1b[90m→ score ${l.score} (${l.temperature}) · ${l.stage} · ${JSON.stringify(l.data)}\x1b[0m`);
 }

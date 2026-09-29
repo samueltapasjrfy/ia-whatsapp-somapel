@@ -5,3 +5,4 @@ data/
 # logs e arquivos temporarios
 *.log
 nohup.out
+teste-db.js

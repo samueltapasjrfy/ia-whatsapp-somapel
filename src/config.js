@@ -62,6 +62,15 @@ export const config = {
   waAppSecret: process.env.WHATSAPP_APP_SECRET,
   webhookPort: Number(process.env.WEBHOOK_PORT || 8080),
 
+  // Postgres do CRM. Saiu do SQLite porque arquivo em disco de conteiner morre com o
+  // conteiner, e nenhuma tela alcanca um SQLite dentro de outro processo.
+  databaseUrl: process.env.DATABASE_URL,
+  // URL e chave da API do CRM: e por ela que o prospect qualificado nasce la dentro.
+  crmUrl: (process.env.CRM_URL || '').replace(/\/$/, ''),
+  // Login dedicado ao agente. Usuario de verdade, para o prospect nascer assinado e passar
+  // pelas mesmas permissoes e pelo mesmo log de auditoria de um cadastro feito a mao.
+  crmEmail: process.env.CRM_EMAIL,
+  crmSenha: process.env.CRM_SENHA,
   dbPath: process.env.DB_PATH || 'data/somapel.db',
   authDir: process.env.WA_AUTH_DIR || 'data/wa-auth',
   pairingNumber: (process.env.WA_PAIRING_NUMBER || '').replace(/\D/g, ''),

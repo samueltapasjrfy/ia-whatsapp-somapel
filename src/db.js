@@ -1,84 +1,197 @@
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+// Armazenamento das conversas no Postgres do CRM.
+//
+// Era SQLite num arquivo local. Dois motivos para sair de lá: o arquivo morre junto com o
+// contêiner (e o combinado é que este serviço não pode cair), e nenhuma tela alcança um
+// SQLite dentro de outro processo. No Postgres do CRM os dados entram no backup que já
+// existe, a tela de conversas lê direto e não há sincronização nem duas verdades.
+//
+// **A interface não mudou de forma, só de tempo.** As mesmas sete funções, os mesmos
+// objetos de volta — só que agora com `await`. Foi de propósito: o resto do agente não
+// precisa saber onde os dados moram.
+//
+// A tradução de vocabulário mora aqui e só aqui. O agente pensa em "lead", "stage",
+// "push_name"; o CRM fala "conversa", "etapa", "nome do WhatsApp" — e a palavra "lead"
+// não existe no glossário de lá. Traduzir na fronteira deixa os dois lados coerentes
+// consigo mesmos.
+import pg from 'pg';
 import { config } from './config.js';
 
-mkdirSync(dirname(config.dbPath), { recursive: true });
-const db = new DatabaseSync(config.dbPath);
+// O Postgres devolve BIGINT e NUMERIC como string para não perder precisão. Aqui os ids
+// cabem folgados em Number, e string vazando para o resto do código viraria bug silencioso.
+pg.types.setTypeParser(20, (v) => Number(v));
 
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  CREATE TABLE IF NOT EXISTS leads (
-    id            TEXT PRIMARY KEY,          -- jid do WhatsApp ou id da sessão CLI
-    phone         TEXT,
-    push_name     TEXT,
-    origin        TEXT DEFAULT 'inbound',    -- inbound | outbound
-    stage         TEXT DEFAULT 'novo',       -- novo | em_qualificacao | qualificado | encaminhado | nutrir | desqualificado
-    score         INTEGER DEFAULT 0,
-    temperature   TEXT DEFAULT 'frio',       -- frio | morno | quente
-    data          TEXT DEFAULT '{}',         -- campos de qualificação (JSON)
-    summary       TEXT,
-    paused_until  INTEGER DEFAULT 0,
-    handed_off_at INTEGER,
-    created_at    INTEGER,
-    updated_at    INTEGER
-  );
-  CREATE TABLE IF NOT EXISTS messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    lead_id    TEXT NOT NULL,
-    role       TEXT NOT NULL,                -- user | assistant | human | system
-    content    TEXT NOT NULL,
-    created_at INTEGER
-  );
-  CREATE INDEX IF NOT EXISTS idx_messages_lead ON messages(lead_id, id);
-`);
+const pool = new pg.Pool({
+  connectionString: config.databaseUrl,
+  // Poucas conexões de propósito: é um processo só, e o RDS é compartilhado com o CRM.
+  max: 6,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 10_000,
+  // O RDS exige TLS e usa certificado da própria AWS.
+  ssl: config.databaseUrl?.includes('rds.amazonaws.com') ? { rejectUnauthorized: false } : undefined,
+});
 
-const now = () => Date.now();
+pool.on('error', (err) => {
+  // Conexão ociosa derrubada pelo servidor não é motivo para matar o processo: o pool abre
+  // outra na próxima consulta. Sem este handler, o Node encerra o agente.
+  console.error('⚠️  erro no pool do Postgres:', err.message);
+});
 
-export function getLead(id) {
-  const row = db.prepare('SELECT * FROM leads WHERE id = ?').get(id);
-  return row ? { ...row, data: JSON.parse(row.data || '{}') } : null;
+const q = (texto, valores) => pool.query(texto, valores);
+
+/* ─────────────────────────── tradução na fronteira ─────────────────────────── */
+
+const PAPEL_PARA_CRM = { user: 'cliente', assistant: 'ia', human: 'humano', system: 'sistema' };
+const PAPEL_DO_CRM = { cliente: 'user', ia: 'assistant', humano: 'human', sistema: 'system' };
+
+/** Da linha do banco para o objeto que o agente espera, com os nomes dele. */
+function paraLead(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    phone: row.telefone,
+    push_name: row.nome_whatsapp,
+    origin: row.origem,
+    stage: row.etapa,
+    score: row.score,
+    temperature: row.temperatura,
+    data: row.dados ?? {},
+    summary: row.resumo,
+    // O agente compara com `Date.now()`; no banco é timestamp. A conversão fica aqui para
+    // nenhum `lead.paused_until > Date.now()` espalhado pelo código precisar mudar.
+    paused_until: row.pausada_ate ? new Date(row.pausada_ate).getTime() : 0,
+    handed_off_at: row.encaminhada_em ? new Date(row.encaminhada_em).getTime() : null,
+    prospect_id: row.prospect_id ?? null,
+    created_at: new Date(row.criada_em).getTime(),
+    updated_at: new Date(row.atualizada_em).getTime(),
+  };
 }
 
-export function upsertLead(id, { phone, pushName } = {}) {
-  const existing = getLead(id);
-  if (existing) {
-    if (pushName && pushName !== existing.push_name) {
-      db.prepare('UPDATE leads SET push_name = ?, updated_at = ? WHERE id = ?').run(pushName, now(), id);
-    }
-    return getLead(id);
+/** Dos campos do agente para as colunas do CRM. */
+const COLUNA = {
+  phone: 'telefone', push_name: 'nome_whatsapp', origin: 'origem', stage: 'etapa',
+  score: 'score', temperature: 'temperatura', data: 'dados', summary: 'resumo',
+  paused_until: 'pausada_ate', handed_off_at: 'encaminhada_em', prospect_id: 'prospect_id',
+};
+/** Campos de tempo chegam como epoch ms do agente e saem como timestamp para o banco. */
+const TEMPO = new Set(['paused_until', 'handed_off_at']);
+
+/* ──────────────────────────────── a interface ──────────────────────────────── */
+
+export async function getLead(id) {
+  const { rows } = await q('SELECT * FROM crm.conversas WHERE id = $1', [id]);
+  return paraLead(rows[0]);
+}
+
+export async function upsertLead(id, { phone, pushName } = {}) {
+  // Uma ida ao banco em vez de "busca, decide, escreve": duas mensagens chegando juntas
+  // criariam a mesma conversa duas vezes, e a segunda estouraria na chave primária.
+  const { rows } = await q(
+    `INSERT INTO crm.conversas (id, telefone, nome_whatsapp, atualizada_em)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (id) DO UPDATE
+        SET nome_whatsapp = coalesce(EXCLUDED.nome_whatsapp, crm.conversas.nome_whatsapp),
+            atualizada_em = now()
+     RETURNING *`,
+    [id, phone || null, pushName || null],
+  );
+  return paraLead(rows[0]);
+}
+
+export async function updateLead(id, campos) {
+  const entradas = Object.entries(campos).filter(([c]) => COLUNA[c]);
+  if (!entradas.length) return getLead(id);
+
+  const sets = entradas.map(([c], i) => `${COLUNA[c]} = $${i + 2}`);
+  const valores = entradas.map(([c, v]) => {
+    if (TEMPO.has(c)) return v ? new Date(v) : null;
+    if (c === 'data') return JSON.stringify(v ?? {});
+    return v;
+  });
+  const { rows } = await q(
+    `UPDATE crm.conversas SET ${sets.join(', ')}, atualizada_em = now()
+      WHERE id = $1 RETURNING *`,
+    [id, ...valores],
+  );
+  return paraLead(rows[0]);
+}
+
+export async function addMessage(leadId, role, content) {
+  await q(
+    'INSERT INTO crm.mensagens_whatsapp (conversa_id, papel, conteudo) VALUES ($1, $2, $3)',
+    [leadId, PAPEL_PARA_CRM[role] ?? role, content],
+  );
+  // Mensagem nova reordena a lista de conversas da tela. Sem isto, a conversa que acabou de
+  // receber mensagem ficaria no fim da lista até alguém mexer nela.
+  await q('UPDATE crm.conversas SET atualizada_em = now() WHERE id = $1', [leadId]);
+}
+
+export async function getHistory(leadId, limit) {
+  const { rows } = await q(
+    `SELECT papel, conteudo, criada_em FROM crm.mensagens_whatsapp
+      WHERE conversa_id = $1 ORDER BY id DESC LIMIT $2`,
+    [leadId, limit],
+  );
+  return rows.reverse().map((r) => ({
+    role: PAPEL_DO_CRM[r.papel] ?? r.papel,
+    content: r.conteudo,
+    created_at: new Date(r.criada_em).getTime(),
+  }));
+}
+
+export async function listLeads() {
+  const { rows } = await q(
+    'SELECT * FROM crm.conversas ORDER BY score DESC, atualizada_em DESC',
+  );
+  return rows.map(paraLead);
+}
+
+export async function resetLead(id) {
+  // As mensagens caem por CASCADE; apagar explicitamente deixa a intenção à vista.
+  await q('DELETE FROM crm.mensagens_whatsapp WHERE conversa_id = $1', [id]);
+  await q('DELETE FROM crm.conversas WHERE id = $1', [id]);
+}
+
+/**
+ * Mensagens que uma pessoa escreveu pelo CRM e ainda não foram para o WhatsApp.
+ *
+ * `FOR UPDATE SKIP LOCKED` é o que torna isto seguro com mais de um processo: cada um leva
+ * linhas diferentes, ninguém espera ninguém e nada é enviado duas vezes. É fila de verdade
+ * sem precisar de Redis — uma peça a menos para cair.
+ */
+export async function pegarEnviosPendentes(limite = 20) {
+  const cliente = await pool.connect();
+  try {
+    await cliente.query('BEGIN');
+    const { rows } = await cliente.query(
+      `SELECT m.id, m.conversa_id, m.conteudo, c.telefone
+         FROM crm.mensagens_whatsapp m
+         JOIN crm.conversas c ON c.id = m.conversa_id
+        WHERE m.papel = 'humano' AND m.enviada_em IS NULL
+        ORDER BY m.id
+        LIMIT $1
+          FOR UPDATE OF m SKIP LOCKED`,
+      [limite],
+    );
+    return { cliente, rows };
+  } catch (err) {
+    await cliente.query('ROLLBACK').catch(() => {});
+    cliente.release();
+    throw err;
   }
-  db.prepare('INSERT INTO leads (id, phone, push_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-    .run(id, phone || null, pushName || null, now(), now());
-  return getLead(id);
 }
 
-export function updateLead(id, fields) {
-  const cols = Object.keys(fields);
-  if (!cols.length) return getLead(id);
-  const values = cols.map((c) => (c === 'data' ? JSON.stringify(fields[c]) : fields[c]));
-  db.prepare(`UPDATE leads SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = ? WHERE id = ?`)
-    .run(...values, now(), id);
-  return getLead(id);
+export async function marcarEnviada(cliente, id, erro = null) {
+  await cliente.query(
+    'UPDATE crm.mensagens_whatsapp SET enviada_em = now(), erro_envio = $2 WHERE id = $1',
+    [id, erro],
+  );
 }
 
-export function addMessage(leadId, role, content) {
-  db.prepare('INSERT INTO messages (lead_id, role, content, created_at) VALUES (?, ?, ?, ?)')
-    .run(leadId, role, content, now());
+export async function fecharLote(cliente, ok = true) {
+  await cliente.query(ok ? 'COMMIT' : 'ROLLBACK').catch(() => {});
+  cliente.release();
 }
 
-export function getHistory(leadId, limit) {
-  return db.prepare('SELECT role, content, created_at FROM messages WHERE lead_id = ? ORDER BY id DESC LIMIT ?')
-    .all(leadId, limit)
-    .reverse();
-}
-
-export function listLeads() {
-  return db.prepare('SELECT * FROM leads ORDER BY score DESC, updated_at DESC').all()
-    .map((r) => ({ ...r, data: JSON.parse(r.data || '{}') }));
-}
-
-export function resetLead(id) {
-  db.prepare('DELETE FROM messages WHERE lead_id = ?').run(id);
-  db.prepare('DELETE FROM leads WHERE id = ?').run(id);
+export async function encerrar() {
+  await pool.end();
 }

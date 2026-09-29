@@ -92,8 +92,8 @@ const chatTools = [
 
 const tools = chatTools.map(({ function: f }) => ({ type: 'function', ...f }));
 
-function handleTool(leadId, name, args, out) {
-  let lead = getLead(leadId);
+async function handleTool(leadId, name, args, out) {
+  let lead = await getLead(leadId);
   switch (name) {
     case 'registrar_qualificacao': {
       const { estagio, resumo, ...fields } = args;
@@ -109,7 +109,7 @@ function handleTool(leadId, name, args, out) {
       let stage = estagio || (lead.stage === 'novo' ? 'em_qualificacao' : lead.stage);
       if (lead.stage === 'encaminhado' && !data.nao_e_lead) stage = 'encaminhado';
       if (data.nao_e_lead) stage = 'desqualificado';
-      lead = updateLead(leadId, { data, score: s.score, temperature: s.temperature, stage, summary: resumo || lead.summary });
+      lead = await updateLead(leadId, { data, score: s.score, temperature: s.temperature, stage, summary: resumo || lead.summary });
       const prev = dataBefore;
       const novos = ['nome', 'empresa', 'cnpj', 'email', 'cargo', 'cidade_uf', 'volume', 'produtos_interesse', 'prazo']
         .concat('produto_recomendado').filter((k) => clean[k] !== undefined && (Array.isArray(clean[k])
@@ -127,8 +127,8 @@ function handleTool(leadId, name, args, out) {
     }
     case 'encaminhar_para_consultor': {
       if (lead.handed_off_at) return { ok: true, aviso: `Lead já havia sido encaminhado; ${config.sellerName} já foi notificada.` };
-      updateLead(leadId, { stage: 'encaminhado', handed_off_at: Date.now() });
-      out.handoff = { ...args, lead: getLead(leadId) };
+      await updateLead(leadId, { stage: 'encaminhado', handed_off_at: Date.now() });
+      out.handoff = { ...args, lead: await getLead(leadId) };
       return { ok: true, mensagem: `${config.sellerName} foi notificada e vai chamar o cliente neste mesmo WhatsApp. Avise o cliente pelo nome dela.` };
     }
     case 'enviar_catalogo':
@@ -186,9 +186,9 @@ function historyToInput(history) {
  */
 export async function runAgent(leadId, { images = [] } = {}) {
   const out = { attachments: [], handoff: null, updates: [] };
-  const lead = getLead(leadId);
+  const lead = await getLead(leadId);
   const input = [
-    ...historyToInput(getHistory(leadId, config.historyLimit)),
+    ...historyToInput(await getHistory(leadId, config.historyLimit)),
     { role: 'developer', content: buildContextPrompt(lead) },
   ];
 
@@ -223,24 +223,26 @@ export async function runAgent(leadId, { images = [] } = {}) {
     for (const call of calls) {
       let args = {};
       try { args = JSON.parse(call.arguments || '{}'); } catch { /* argumentos inválidos */ }
-      const result = handleTool(leadId, call.name, args, out);
+      // await obrigatorio: sem ele o JSON.stringify abaixo serializaria uma Promise e o
+      // modelo receberia "{}" como resultado da ferramenta, sem erro nenhum.
+      const result = await handleTool(leadId, call.name, args, out);
       if (process.env.DEBUG) console.log(`  🔧 ${call.name}`, JSON.stringify(args), '→', JSON.stringify(result));
       input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result) });
     }
   }
 
   // Rede de segurança: lead aquecido com nome e interesse conhecidos vai para a vendedora mesmo se o modelo esquecer.
-  const after = getLead(leadId);
+  const after = await getLead(leadId);
   // Usa o nome informado na conversa; o nome do perfil do WhatsApp só serve de fallback para lead quente.
   const temNome = after.data.nome || (after.temperature === 'quente' && after.push_name);
   if (!after.handed_off_at && !after.data.nao_e_lead && after.score >= config.handoffScore
     && temNome && after.data.produtos_interesse?.length) {
-    updateLead(leadId, { stage: 'encaminhado', handed_off_at: Date.now() });
-    out.handoff = { motivo: 'lead_aquecido', urgencia: after.temperature === 'quente' ? 'alta' : 'media', resumo_para_consultor: after.summary || after.data.necessidade || '', lead: getLead(leadId) };
+    await updateLead(leadId, { stage: 'encaminhado', handed_off_at: Date.now() });
+    out.handoff = { motivo: 'lead_aquecido', urgencia: after.temperature === 'quente' ? 'alta' : 'media', resumo_para_consultor: after.summary || after.data.necessidade || '', lead: await getLead(leadId) };
   }
 
   const replies = splitBubbles(texts.join('\n\n'));
-  if (replies.length) addMessage(leadId, 'assistant', replies.join('\n\n'));
+  if (replies.length) await addMessage(leadId, 'assistant', replies.join('\n\n'));
   return { replies, ...out };
 }
 

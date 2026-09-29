@@ -111,13 +111,13 @@ async function onMessage(msg) {
     if (botSentIds.has(msg.key.id)) return;
     const selfJid = jidNormalizedUser(sock.user?.id);
     if (jid === selfJid || jid === jidNormalizedUser(sock.user?.lid || '')) return;
-    const lead = getLead(jid);
+    const lead = await getLead(jid);
     if (!lead) return;
     const cmd = text.trim().toLowerCase();
-    if (cmd === '#bot') { updateLead(jid, { paused_until: 0 }); log(`▶️  bot retomado em ${lead.phone}`); return; }
-    if (cmd === '#pausar') { updateLead(jid, { paused_until: Date.now() + 30 * 24 * 3600e3 }); log(`⏸️  bot pausado em ${lead.phone}`); return; }
-    if (text) addMessage(jid, 'human', text);
-    updateLead(jid, { paused_until: Date.now() + config.humanPauseMinutes * 60e3 });
+    if (cmd === '#bot') { await updateLead(jid, { paused_until: 0 }); log(`▶️  bot retomado em ${lead.phone}`); return; }
+    if (cmd === '#pausar') { await updateLead(jid, { paused_until: Date.now() + 30 * 24 * 3600e3 }); log(`⏸️  bot pausado em ${lead.phone}`); return; }
+    if (text) await addMessage(jid, 'human', text);
+    await updateLead(jid, { paused_until: Date.now() + config.humanPauseMinutes * 60e3 });
     log(`🧑 humano respondeu ${lead.phone} — bot pausado por ${config.humanPauseMinutes} min (envie #bot no chat para retomar)`);
     return;
   }
@@ -129,7 +129,7 @@ async function onMessage(msg) {
     return;
   }
 
-  const lead = upsertLead(jid, { phone: normalizeBR(phone), pushName: msg.pushName });
+  const lead = await upsertLead(jid, { phone: normalizeBR(phone), pushName: msg.pushName });
 
   // Monta o conteúdo do item (texto / áudio transcrito / imagem)
   const item = { key: msg.key, text: text.trim(), images: [] };
@@ -161,7 +161,7 @@ async function onMessage(msg) {
   if (!item.text) return;
 
   log(`📩 ${lead.push_name || phone}: ${item.text}`);
-  addMessage(jid, 'user', item.text);
+  await addMessage(jid, 'user', item.text);
 
   if (lead.paused_until > Date.now()) {
     log(`⏸️  chat ${phone} em atendimento humano — bot não responde`);
@@ -203,7 +203,7 @@ async function flush(jid) {
       await sock.sendPresenceUpdate('composing', jid).catch(() => {});
       if (typingMs > 0) await sleep(typingMs);
       await send(jid, { text: replies[i] });
-      log(`🤖 ${config.agentName} → ${getLead(jid).phone}: ${replies[i].replace(/\n/g, ' ⏎ ')}`);
+      log(`🤖 ${config.agentName} → ${await getLead(jid).phone}: ${replies[i].replace(/\n/g, ' ⏎ ')}`);
     }
     for (const a of attachments) await sendAttachment(jid, a);
     await sock.sendPresenceUpdate('paused', jid).catch(() => {});
@@ -211,12 +211,12 @@ async function flush(jid) {
     if (handoff) await notifySellers(formatHandoff(handoff), handoff.lead);
     for (const u of updates) await notifySellers(u);
 
-    const l = getLead(jid);
+    const l = await getLead(jid);
     log(`📊 ${l.phone}: score ${l.score} (${l.temperature}) · ${l.stage}`);
   } catch (err) {
     log('❌ falha ao responder:', err);
     await send(jid, { text: 'Opa, tive uma instabilidade aqui 😅 Já já te respondo!' }).catch(() => {});
-    await notifySellers(`⚠️ O agente falhou ao responder ${getLead(jid)?.phone}. Verifique o chat.`);
+    await notifySellers(`⚠️ O agente falhou ao responder ${await getLead(jid)?.phone}. Verifique o chat.`);
   } finally {
     chat.running = false;
     if (chat.pending.length) chat.timer = setTimeout(() => flush(jid), 1500);

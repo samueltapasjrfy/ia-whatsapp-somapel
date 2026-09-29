@@ -1,7 +1,7 @@
 // Lista os leads ranqueados por score. Uso: npm run leads  ·  npm run leads -- --csv > leads.csv
 import { listLeads } from './db.js';
 
-const leads = listLeads().filter((l) => !l.id.startsWith('sim:'));
+const leads = await listLeads().filter((l) => !l.id.startsWith('sim:'));
 const fmt = (ts) => (ts ? new Date(ts).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '');
 
 if (process.argv.includes('--csv')) {

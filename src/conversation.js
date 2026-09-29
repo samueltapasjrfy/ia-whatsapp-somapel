@@ -3,7 +3,8 @@
 // "digitando", pausa por humano e notificação da vendedora fica aqui.
 import { formatHandoff, leadVCard, runAgent } from './agent.js';
 import { brVariants, config, formatBR } from './config.js';
-import { addMessage, getLead, upsertLead } from './db.js';
+import { addMessage, getLead, updateLead, upsertLead } from './db.js';
+import { criarProspect } from './crm.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -50,10 +51,10 @@ export function createConversation(channel, log = console.log) {
    * Registra a mensagem do lead e agenda a resposta (aguardando mensagens picadas).
    * @param {{ leadId, to, phone, pushName, text, images?, raw? }} msg
    */
-  function onIncoming({ leadId, to, phone, pushName, text, images = [], raw }) {
-    const lead = upsertLead(leadId, { phone, pushName });
+  async function onIncoming({ leadId, to, phone, pushName, text, images = [], raw }) {
+    const lead = await upsertLead(leadId, { phone, pushName });
     log(`📩 ${lead.push_name || formatBR(phone)}: ${text}`);
-    addMessage(leadId, 'user', text);
+    await addMessage(leadId, 'user', text);
 
     if (lead.paused_until > Date.now()) {
       log(`⏸️  ${formatBR(phone)} em atendimento humano — bot não responde`);
@@ -94,7 +95,7 @@ export function createConversation(channel, log = console.log) {
         await channel.typing?.(to, true).catch(() => {});
         if (espera > 0) await sleep(espera);
         await channel.sendText(to, replies[i]);
-        log(`🤖 ${config.agentName} → ${getLead(leadId).phone}: ${replies[i].replace(/\n/g, ' ⏎ ')}`);
+        log(`🤖 ${config.agentName} → ${await getLead(leadId).phone}: ${replies[i].replace(/\n/g, ' ⏎ ')}`);
       }
       for (const a of attachments) {
         try {
@@ -108,15 +109,22 @@ export function createConversation(channel, log = console.log) {
       }
       await channel.typing?.(to, false).catch(() => {});
 
-      if (handoff) await notifySellers(formatHandoff(handoff), handoff.lead);
+      if (handoff) {
+        // O prospect nasce no CRM junto com o aviso a vendedora, e antes dele: quando ela
+        // abrir o WhatsApp, o cadastro ja esta la para ela trabalhar. `criarProspect` nunca
+        // lanca — falhar em criar nao pode derrubar o atendimento.
+        const criado = await criarProspect(handoff.lead, log);
+        if (criado?.id) await updateLead(leadId, { prospect_id: criado.id });
+        await notifySellers(formatHandoff(handoff), handoff.lead);
+      }
       for (const u of updates) await notifySellers(u);
 
-      const l = getLead(leadId);
+      const l = await getLead(leadId);
       log(`📊 ${l.phone}: score ${l.score} (${l.temperature}) · ${l.stage}`);
     } catch (err) {
       log('❌ falha ao responder:', err);
       await channel.sendText(to, 'Opa, tive uma instabilidade aqui 😅 Já já te respondo!').catch(() => {});
-      await notifySellers(`⚠️ O agente falhou ao responder ${getLead(leadId)?.phone}. Verifique o chat.`);
+      await notifySellers(`⚠️ O agente falhou ao responder ${await getLead(leadId)?.phone}. Verifique o chat.`);
     } finally {
       chat.running = false;
       if (chat.pending.length) chat.timer = setTimeout(() => flush(leadId), 1500);

@@ -7,7 +7,8 @@ import { basename } from 'node:path';
 import { transcribeAudio } from './agent.js';
 import { config, formatBR, normalizeBR } from './config.js';
 import { createConversation } from './conversation.js';
-import { addMessage, getLead, updateLead } from './db.js';
+import { fecharLote, marcarEnviada, pegarEnviosPendentes, updateLead } from './db.js';
+import { addMessage, getLead } from './db.js';
 
 const log = (...a) => console.log(new Date().toLocaleTimeString('pt-BR'), ...a);
 const GRAPH = `https://graph.facebook.com/${config.waApiVersion}`;
@@ -107,20 +108,20 @@ async function handleMessage(m, contato) {
   }
   if (!text) return;
 
-  onIncoming({ leadId, to: m.from, phone, pushName: contato?.profile?.name, text, images, raw: m });
+  await onIncoming({ leadId, to: m.from, phone, pushName: contato?.profile?.name, text, images, raw: m });
 }
 
 // Mensagens enviadas pela equipe pelo app do WhatsApp Business (echo) → humano assumiu o chat.
-function handleEcho(m) {
+async function handleEcho(m) {
   const phone = normalizeBR(m.to || m.recipient_id || '');
-  const lead = getLead(`wa:${phone}`);
+  const lead = await getLead(`wa:${phone}`);
   if (!lead) return;
   const texto = extractText(m).trim();
   const cmd = texto.toLowerCase();
-  if (cmd === '#bot') { updateLead(lead.id, { paused_until: 0 }); log(`▶️  bot retomado em ${formatBR(phone)}`); return; }
-  if (cmd === '#pausar') { updateLead(lead.id, { paused_until: Date.now() + 30 * 24 * 3600e3 }); log(`⏸️  bot pausado em ${formatBR(phone)}`); return; }
-  if (texto) addMessage(lead.id, 'human', texto);
-  updateLead(lead.id, { paused_until: Date.now() + config.humanPauseMinutes * 60e3 });
+  if (cmd === '#bot') { await updateLead(lead.id, { paused_until: 0 }); log(`▶️  bot retomado em ${formatBR(phone)}`); return; }
+  if (cmd === '#pausar') { await updateLead(lead.id, { paused_until: Date.now() + 30 * 24 * 3600e3 }); log(`⏸️  bot pausado em ${formatBR(phone)}`); return; }
+  if (texto) await addMessage(lead.id, 'human', texto);
+  await updateLead(lead.id, { paused_until: Date.now() + config.humanPauseMinutes * 60e3 });
   log(`🧑 humano respondeu ${formatBR(phone)} — bot pausado por ${config.humanPauseMinutes} min (envie #bot no chat para retomar)`);
 }
 
@@ -155,7 +156,7 @@ createServer((req, res) => {
           for (const { value } of entry.changes || []) {
             for (const m of value?.messages || []) {
               const phone = normalizeBR(m.from);
-              if (m.from === config.waPhone) { handleEcho(m); continue; }
+              if (m.from === config.waPhone) { await handleEcho(m); continue; }
               if (!isAllowed(phone)) {
                 log(`🙈 ignorando ${formatBR(phone)} — fora de ALLOWED_NUMBERS`);
                 continue;
@@ -185,3 +186,48 @@ createServer((req, res) => {
   log(`👩‍💼 Leads aquecidos (score ≥ ${config.handoffScore}) vão para ${config.sellerName}: ${config.sellerNumbers.map(formatBR).join(', ') || '(não configurado)'}`);
   if (!config.replyToAll) log(`🔒 Modo seguro: respondendo apenas ${config.allowedNumbers.map(formatBR).join(', ') || '(ninguém — configure ALLOWED_NUMBERS)'}`);
 });
+
+/**
+ * Leva ao WhatsApp o que alguem escreveu na tela do CRM.
+ *
+ * A tela grava a mensagem como pendente e devolve na hora — ninguem fica esperando a Meta
+ * responder para ver o proprio balao aparecer. Este laco e quem entrega de verdade.
+ *
+ * `SKIP LOCKED` no banco garante que dois processos nunca peguem a mesma linha, entao dobrar
+ * o numero de agentes amanha nao envia nada duas vezes. E o lote so e confirmado no fim: se
+ * o processo morrer no meio, as linhas voltam a ficar pendentes e saem quando ele voltar.
+ * E fila durável sem Redis — uma peca a menos para cair.
+ *
+ * Escrever pela tela tambem **cala a IA** naquela conversa: quem assumiu, assumiu.
+ */
+async function despacharDoCrm() {
+  let lote;
+  try {
+    lote = await pegarEnviosPendentes(20);
+  } catch (err) {
+    log('⚠️  não consegui ler a fila de envio:', err.message);
+    return;
+  }
+  const { cliente, rows } = lote;
+  if (!rows.length) { await fecharLote(cliente, true); return; }
+
+  for (const m of rows) {
+    try {
+      await channel.sendText(m.telefone, m.conteudo);
+      await marcarEnviada(cliente, m.id);
+      await updateLead(m.conversa_id, { paused_until: Date.now() + config.humanPauseMinutes * 60e3 });
+      log(`💬 ${formatBR(m.telefone)} ← (CRM): ${m.conteudo.replace(/\n/g, ' ⏎ ').slice(0, 80)}`);
+    } catch (err) {
+      // Marca a falha na propria linha em vez de tentar para sempre: mensagem que a Meta
+      // recusou (fora da janela de 24h, por exemplo) nao melhora com insistencia, e a tela
+      // precisa mostrar que nao foi.
+      await marcarEnviada(cliente, m.id, err.message.slice(0, 300));
+      log(`❌ falha ao enviar para ${formatBR(m.telefone)}: ${err.message}`);
+    }
+  }
+  await fecharLote(cliente, true);
+}
+
+// A cada 2 segundos. Curto para o balao sair quase junto com o clique, e barato: uma consulta
+// indexada que quase sempre volta vazia. `unref` para o laco nao segurar o processo de pe.
+setInterval(() => { despacharDoCrm().catch((e) => log('⚠️  despacho:', e.message)); }, 2000).unref();
