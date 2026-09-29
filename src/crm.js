@@ -92,6 +92,39 @@ export async function identificarDocumento({ doc, telefone, contatoNome, nome, o
 }
 
 /**
+ * Grava o atendimento na ficha do cliente.
+ *
+ * O CRM trata uma conversa como UM atendimento por dia: chamar de novo no mesmo dia so
+ * atualiza o resumo, nao cria linha nova. Por isso esta funcao pode ser chamada a cada
+ * resposta sem encher a ficha — a decisao de agrupar e de la, nao daqui.
+ *
+ * So faz sentido com `entidadeId`: sem cadastro nao ha ficha onde escrever. A conversa em
+ * si continua salva em `crm.conversas` de qualquer jeito.
+ *
+ * **Nunca lanca.** Falhar em registrar nao pode derrubar o atendimento em andamento.
+ */
+export async function registrarAtendimento({ entidadeId, conversaId, resultado, observacao }, log = console.log) {
+  if (!config.crmUrl || !config.crmEmail || entidadeId == null) return null;
+  const texto = (observacao ?? '').trim();
+  if (!texto) return null;
+
+  try {
+    const r = await chamar(`/clientes/${entidadeId}/atendimento-whatsapp`, {
+      method: 'POST',
+      body: JSON.stringify({ conversaId, resultado, observacao: texto.slice(0, 2000) }),
+    });
+    if (!r.ok) {
+      log(`⚠️  CRM recusou o atendimento de ${conversaId}: ${r.status} ${(await r.text()).slice(0, 160)}`);
+      return null;
+    }
+    return await r.json();
+  } catch (err) {
+    log(`⚠️  falha ao registrar atendimento de ${conversaId}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Cria o prospect no CRM a partir do que a IA extraiu.
  *
  * Devolve `{ id }` quando criou, `null` quando não havia o mínimo ou quando o cadastro já

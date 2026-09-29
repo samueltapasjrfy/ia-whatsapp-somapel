@@ -347,6 +347,30 @@ export function formatHandoff(h) {
   ].filter((x) => x !== null).join('\n');
 }
 
+/**
+ * O atendimento como o vendedor vai ler na ficha.
+ *
+ * Texto corrido e curto, nao JSON: quem abre a ficha quer saber em cinco segundos o que a
+ * pessoa precisa e em que pe ficou. Os campos entram em ordem de utilidade para quem vai
+ * ligar — o que precisa, quanto, ate quando, com quem falar.
+ */
+export function resumoParaFicha(lead) {
+  const d = lead.data ?? {};
+  const linhas = [
+    lead.summary,
+    d.necessidade && !lead.summary?.includes(d.necessidade) ? `Precisa: ${d.necessidade}` : null,
+    d.produto_recomendado ? `Produto: ${d.produto_recomendado}`
+      : d.produtos_interesse?.length ? `Produtos: ${d.produtos_interesse.join(', ')}` : null,
+    d.volume ? `Volume: ${d.volume}` : null,
+    d.prazo && d.prazo !== 'sem_prazo' ? `Prazo: ${d.prazo.replace(/_/g, ' ')}` : null,
+    d.solucao_atual ? `Hoje usa: ${d.solucao_atual}` : null,
+    d.objecoes ? `Objeções: ${d.objecoes}` : null,
+    `Falei com ${d.nome || lead.push_name || 'contato sem nome'} pelo WhatsApp ${formatBR(lead.phone)}`
+      + ` · score ${lead.score} (${lead.temperature})`,
+  ].filter(Boolean);
+  return linhas.join('\n').slice(0, 2000);
+}
+
 // vCard do lead, para a vendedora salvar/chamar com um toque.
 export function leadVCard(lead) {
   const nome = lead.data.nome || lead.push_name || 'Lead Somapel';

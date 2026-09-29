@@ -1,10 +1,10 @@
 // Núcleo de atendimento, independente do canal (Baileys ou Cloud API da Meta).
 // O canal só precisa saber enviar texto/imagem/documento; a lógica de buffer,
 // "digitando", pausa por humano e notificação da vendedora fica aqui.
-import { formatHandoff, leadVCard, runAgent } from './agent.js';
+import { formatHandoff, leadVCard, resumoParaFicha, runAgent } from './agent.js';
 import { brVariants, config, formatBR } from './config.js';
 import { addMessage, getLead, updateLead, upsertLead } from './db.js';
-import { criarProspect } from './crm.js';
+import { criarProspect, registrarAtendimento } from './crm.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -126,6 +126,29 @@ export function createConversation(channel, log = console.log) {
 
       const l = await getLead(leadId);
       log(`📊 ${l.phone}: score ${l.score} (${l.temperature}) · ${l.stage}`);
+
+      // O atendimento vai para a ficha do cliente, nao so para a tela de conversas. Sem
+      // isto, da mesa do vendedor este atendimento nao aconteceu — que e exatamente o que
+      // cobramos do time humano.
+      //
+      // Roda depois do encaminhamento de proposito: e la que o cadastro nasce quando o
+      // cliente nao passou o documento, e so com `entidade_id` existe ficha onde escrever.
+      // O CRM agrupa por conversa e por dia, entao chamar a cada resposta nao enche nada.
+      await registrarAtendimento({
+        entidadeId: l.entidade_id,
+        conversaId: leadId,
+        resultado: 'CONTATO_FEITO',
+        observacao: resumoParaFicha(l),
+      }, log);
+      if (handoff) {
+        await registrarAtendimento({
+          entidadeId: l.entidade_id,
+          conversaId: leadId,
+          resultado: 'PROPOSTA_PEDIDA',
+          observacao: `Encaminhado para ${config.sellerName} — ${handoff.motivo.replace(/_/g, ' ')}`
+            + ` (urgência ${handoff.urgencia}).\n${handoff.resumo_para_consultor ?? ''}`,
+        }, log);
+      }
     } catch (err) {
       log('❌ falha ao responder:', err);
       await channel.sendText(to, 'Opa, tive uma instabilidade aqui 😅 Já já te respondo!').catch(() => {});
