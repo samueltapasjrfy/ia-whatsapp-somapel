@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import OpenAI from 'openai';
 import { config, formatBR } from './config.js';
 import { addMessage, getHistory, getLead, updateLead } from './db.js';
+import { identificarDocumento } from './crm.js';
 import { buildContextPrompt, buildSystemPrompt } from './prompt.js';
 import { scoreLead } from './scoring.js';
 
@@ -14,6 +15,26 @@ const PRODUCT_NAMES = PRODUCTS.filter((p) => p.fotos.length).map((p) => p.nome);
 const ROOT = new URL('../', import.meta.url).pathname;
 
 const chatTools = [
+  {
+    type: 'function',
+    function: {
+      name: 'identificar_documento',
+      description: 'Descobre quem e a pessoa pelo CPF/CNPJ e ja resolve o cadastro no CRM. '
+        + 'Chame ASSIM QUE o cliente informar o documento, antes de qualquer outra coisa. '
+        + 'Devolve se ele ja e CLIENTE da Somapel, se ja existe como PROSPECT, ou cadastra um '
+        + 'prospect novo com razao social, endereco e ramo puxados da Receita (CRIADO). '
+        + 'Leia o campo "resumo" da resposta: ele diz o que fazer em seguida. '
+        + 'Se voltar SEM_CADASTRO, pergunte o nome da empresa e chame de novo passando nome_empresa.',
+      parameters: {
+        type: 'object',
+        required: ['documento'],
+        properties: {
+          documento: { type: 'string', description: 'CPF ou CNPJ como o cliente mandou, com ou sem pontuacao' },
+          nome_empresa: { type: 'string', description: 'Razao social ou nome da pessoa. So quando a consulta automatica nao trouxer (CPF, ou Receita fora do ar)' },
+        },
+      },
+    },
+  },
   {
     type: 'function',
     function: {
@@ -95,6 +116,52 @@ const tools = chatTools.map(({ function: f }) => ({ type: 'function', ...f }));
 async function handleTool(leadId, name, args, out) {
   let lead = await getLead(leadId);
   switch (name) {
+    case 'identificar_documento': {
+      const r = await identificarDocumento({
+        doc: args.documento,
+        telefone: lead.phone,
+        contatoNome: lead.data.nome || lead.push_name || null,
+        nome: args.nome_empresa || lead.data.empresa || null,
+        observacao: lead.summary || lead.data.necessidade || null,
+      });
+      if (!r) {
+        return { ok: false, erro: 'Nao consegui consultar o cadastro agora. Siga a conversa normalmente e nao peca o documento de novo.' };
+      }
+      if (r.situacao === 'DOC_INVALIDO') return { ok: false, situacao: r.situacao, orientacao: r.resumo };
+      if (r.situacao === 'SEM_CADASTRO') return { ok: false, situacao: r.situacao, orientacao: r.resumo };
+
+      // O documento e a identidade vao para a conversa, nao so para os dados da IA: e o
+      // que liga este atendimento a ficha do cliente na tela e o que sobrevive ao fim do
+      // papo. `entidade_id` e o mesmo id da tela de clientes.
+      const data = {
+        ...lead.data,
+        cnpj: r.doc,
+        ...(r.nome ? { empresa: r.nome } : {}),
+        ...(r.municipio ? { cidade_uf: `${r.municipio}/${r.uf}` } : {}),
+        ...(r.ramo ? { segmento: r.ramo } : {}),
+        ...(r.situacao === 'CLIENTE' ? { ja_e_cliente: true } : {}),
+      };
+      await updateLead(leadId, {
+        data, doc: r.doc, entidade_id: r.id ?? null,
+        ...(r.id != null && r.id < 0 ? { prospect_id: r.id } : {}),
+      });
+
+      // Cliente de casa chegando pelo WhatsApp e coisa que o vendedor tem que saber na hora
+      // — nao no fim da qualificacao. O aviso sai aqui, junto da identificacao.
+      if (r.situacao === 'CLIENTE') {
+        out.updates.push(`🏛️ *Cliente de casa no WhatsApp* — ${r.nome}\n`
+          + `📞 ${formatBR(lead.phone)}\n`
+          + `${r.vendedor ? `👤 Carteira de ${r.vendedor}\n` : '👤 Sem vendedor definido (bolsao)\n'}`
+          + `${r.classificacao ? `🏷️ ${r.classificacao}\n` : ''}`
+          + `${r.ultimaCompra ? `🧾 Ultima compra ha ${r.diasDesdeCompra} dias\n` : ''}`
+          + `👉 Ficha: ${config.crmUrl}/clientes/${r.id}`);
+      }
+      return {
+        ok: true, situacao: r.situacao, id: r.id, nome: r.nome,
+        cidade: r.municipio ? `${r.municipio}/${r.uf}` : null,
+        orientacao: r.resumo,
+      };
+    }
     case 'registrar_qualificacao': {
       const { estagio, resumo, ...fields } = args;
       const clean = Object.fromEntries(Object.entries(fields).filter(([, v]) =>
@@ -264,6 +331,10 @@ export function formatHandoff(h) {
     `👤 *${nome}*${d.cargo ? ` (${d.cargo})` : ''}`,
     `📞 ${l.phone ? formatBR(l.phone) : l.id}`,
     d.empresa || d.segmento || d.cnpj ? `🏢 ${[d.empresa, d.segmento, d.cnpj && `CNPJ ${d.cnpj}`].filter(Boolean).join(' · ')}` : null,
+    // Cliente de casa muda a conversa inteira da vendedora: ela abre a ficha antes de ligar.
+    l.entidade_id != null
+      ? `${d.ja_e_cliente ? '🏛️ *Ja e cliente da Somapel*' : '📇 Cadastro no CRM'} · ${config.crmUrl}/clientes/${l.entidade_id}`
+      : null,
     d.cidade_uf ? `📍 ${d.cidade_uf}` : null,
     d.email ? `✉️ ${d.email}` : null,
     '',

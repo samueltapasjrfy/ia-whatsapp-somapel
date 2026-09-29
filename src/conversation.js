@@ -113,8 +113,13 @@ export function createConversation(channel, log = console.log) {
         // O prospect nasce no CRM junto com o aviso a vendedora, e antes dele: quando ela
         // abrir o WhatsApp, o cadastro ja esta la para ela trabalhar. `criarProspect` nunca
         // lanca — falhar em criar nao pode derrubar o atendimento.
-        const criado = await criarProspect(handoff.lead, log);
-        if (criado?.id) await updateLead(leadId, { prospect_id: criado.id });
+        //
+        // Quem ja passou pelo documento nao passa por aqui: a identificacao pelo CPF/CNPJ
+        // ja achou ou ja criou o cadastro, e chamar de novo so renderia um 409 do CRM.
+        if (handoff.lead.entidade_id == null) {
+          const criado = await criarProspect(handoff.lead, log);
+          if (criado?.id) await updateLead(leadId, { prospect_id: criado.id, entidade_id: criado.id });
+        }
         await notifySellers(formatHandoff(handoff), handoff.lead);
       }
       for (const u of updates) await notifySellers(u);

@@ -58,6 +58,40 @@ function separarCidadeUf(v) {
 }
 
 /**
+ * Descobre de quem e o documento — e cadastra se ainda nao for de ninguem.
+ *
+ * O CRM resolve tudo numa chamada so (ver `IdentificacaoService` la): procura no espelho do
+ * Protheus, procura nos prospects criados aqui, e, nao achando, consulta a Receita e cria o
+ * cadastro ja preenchido. Aqui e so o transporte.
+ *
+ * **Nunca lanca.** Uma falha de rede no meio do atendimento nao pode calar a Sofia; ela
+ * segue a conversa e o documento fica salvo nos dados da conversa de qualquer jeito.
+ * Devolver `null` faz o modelo tratar como "nao consegui agora", que e a verdade.
+ */
+export async function identificarDocumento({ doc, telefone, contatoNome, nome, observacao }, log = console.log) {
+  if (!config.crmUrl || !config.crmEmail) return null;
+  try {
+    const r = await chamar('/clientes/identificar', {
+      method: 'POST',
+      body: JSON.stringify({ doc, telefone, contatoNome, nome, observacao }),
+    });
+    if (!r.ok) {
+      log(`⚠️  CRM recusou a identificacao de ${doc}: ${r.status} ${(await r.text()).slice(0, 160)}`);
+      return null;
+    }
+    const dados = await r.json();
+    const rotulo = { CLIENTE: '🏛️  cliente de casa', PROSPECT: '📇 prospect ja cadastrado',
+                     CRIADO: '🆕 prospect criado', SEM_CADASTRO: '❔ sem cadastro',
+                     DOC_INVALIDO: '❌ documento invalido' }[dados.situacao] ?? dados.situacao;
+    log(`${rotulo}: ${dados.nome ?? doc}`);
+    return dados;
+  } catch (err) {
+    log(`⚠️  falha ao identificar ${doc} no CRM: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Cria o prospect no CRM a partir do que a IA extraiu.
  *
  * Devolve `{ id }` quando criou, `null` quando não havia o mínimo ou quando o cadastro já

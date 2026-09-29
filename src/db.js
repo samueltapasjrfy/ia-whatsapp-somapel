@@ -61,6 +61,10 @@ function paraLead(row) {
     paused_until: row.pausada_ate ? new Date(row.pausada_ate).getTime() : 0,
     handed_off_at: row.encaminhada_em ? new Date(row.encaminhada_em).getTime() : null,
     prospect_id: row.prospect_id ?? null,
+    // Quem e, depois que o documento foi identificado: id positivo e cliente do Protheus,
+    // negativo e prospect do CRM — a mesma convencao da tela de clientes.
+    doc: row.doc ?? null,
+    entidade_id: row.entidade_id ?? null,
     created_at: new Date(row.criada_em).getTime(),
     updated_at: new Date(row.atualizada_em).getTime(),
   };
@@ -71,6 +75,7 @@ const COLUNA = {
   phone: 'telefone', push_name: 'nome_whatsapp', origin: 'origem', stage: 'etapa',
   score: 'score', temperature: 'temperatura', data: 'dados', summary: 'resumo',
   paused_until: 'pausada_ate', handed_off_at: 'encaminhada_em', prospect_id: 'prospect_id',
+  doc: 'doc', entidade_id: 'entidade_id',
 };
 /** Campos de tempo chegam como epoch ms do agente e saem como timestamp para o banco. */
 const TEMPO = new Set(['paused_until', 'handed_off_at']);
