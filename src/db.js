@@ -133,14 +133,17 @@ export async function updateLead(id, campos) {
   return paraLead(rows[0]);
 }
 
-export async function addMessage(leadId, role, content) {
-  await q(
-    'INSERT INTO crm.mensagens_whatsapp (conversa_id, papel, conteudo) VALUES ($1, $2, $3)',
-    [leadId, PAPEL_PARA_CRM[role] ?? role, content],
+export async function addMessage(leadId, role, content, midia = null) {
+  const { rows } = await q(
+    `INSERT INTO crm.mensagens_whatsapp (conversa_id, papel, conteudo, midia)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [leadId, PAPEL_PARA_CRM[role] ?? role, content, midia ? JSON.stringify(midia) : null],
   );
+  const id = rows[0].id;
   // Mensagem nova reordena a lista de conversas da tela. Sem isto, a conversa que acabou de
   // receber mensagem ficaria no fim da lista até alguém mexer nela.
   await q('UPDATE crm.conversas SET atualizada_em = now() WHERE id = $1', [leadId]);
+  return id;
 }
 
 export async function getHistory(leadId, limit) {
@@ -418,4 +421,57 @@ export async function registrarMensagemDeCampanha(cliente, envioId, leadId) {
      VALUES ($1, 'campanha', $2, now())`,
     [leadId, e.texto],
   );
+}
+
+/* ──────────────────────── midia e contatos do WhatsApp ──────────────────────── */
+
+/** Dois megabytes. Nota de voz do WhatsApp raramente passa de duzentos kilobytes. */
+const LIMITE_MIDIA = 2 * 1024 * 1024;
+
+/**
+ * Guarda o que o cliente mandou: audio, imagem, documento.
+ *
+ * Em tabela propria, nao numa coluna da mensagem, porque o chat carrega sessenta mensagens
+ * de uma vez e nenhuma delas precisa dos bytes — so o balao em que a pessoa clicar.
+ *
+ * Arquivo grande demais nao e guardado: a transcricao, que e o que serve para vender, ja
+ * esta no texto da mensagem, e encher o banco com megabytes de audio para a tela nunca
+ * tocar seria pagar caro por nada.
+ */
+export async function guardarMidia(mensagemId, { tipo, mime, nomeArquivo, buffer }) {
+  if (!buffer || buffer.length > LIMITE_MIDIA) return null;
+  const { rows } = await q(
+    `INSERT INTO crm.midias_whatsapp (id, mensagem_id, tipo, mime, nome_arquivo, conteudo)
+     VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5) RETURNING id`,
+    [mensagemId, tipo, mime ?? null, nomeArquivo ?? null, buffer],
+  );
+  return rows[0].id;
+}
+
+/**
+ * O contato que o cliente mandou vira contato da empresa dele, na ficha.
+ *
+ * Usa a chave duravel do Protheus — (origem, codigo, loja) — e nao o `base_id`, que o ETL
+ * recria a cada carga. Assim o contato continua na ficha certa depois de qualquer recarga.
+ *
+ * So entra quando a conversa ja esta ligada a um cadastro: contato solto, sem empresa, nao
+ * tem onde morar e nao ajuda ninguem a vender.
+ */
+export async function guardarContato(entidadeId, conversaId, { nome, celular, email, cargo }) {
+  if (entidadeId == null || !nome) return null;
+  const { rows } = await q(
+    `INSERT INTO crm.contatos (id, base_id, origem, codigo, loja, nome, celular, email, cargo, fonte, conversa_id)
+     SELECT gen_random_uuid()::text, b.id, b.origem, b.codigo, b.loja, $2, $3, $4, $5, 'WHATSAPP', $6
+       FROM public.v_entidades b WHERE b.id = $1
+     ON CONFLICT DO NOTHING
+     RETURNING id`,
+    [entidadeId, nome, celular ?? null, email ?? null, cargo ?? null, conversaId],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/** De que cadastro e esta conversa. Nulo quando ainda nao foi identificada. */
+export async function entidadeDaConversa(leadId) {
+  const { rows } = await q('SELECT entidade_id FROM crm.conversas WHERE id = $1', [leadId]);
+  return rows[0]?.entidade_id ?? null;
 }

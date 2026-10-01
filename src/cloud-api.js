@@ -10,6 +10,7 @@ import { createConversation } from './conversation.js';
 import { fecharLote, marcarEnviada, pegarEnviosPendentes, updateLead } from './db.js';
 import {
   fecharDisparosConcluidos, fecharLoteCampanha, marcarCampanhaEnviada, pegarCampanhaPendente,
+  entidadeDaConversa, guardarContato, guardarMidia,
   registrarAtendimentoDeCampanha, registrarMensagemDeCampanha, registrarRespostaDeCampanha,
   registrarStatusDeEntrega, suprimirTelefone,
 } from './db.js';
@@ -90,6 +91,19 @@ function extractText(m) {
   }
 }
 
+/** O cartao de contato do WhatsApp, reduzido ao que serve: quem e e qual o telefone. */
+function lerContatos(m) {
+  return (m.contacts ?? []).map((c) => ({
+    nome: c.name?.formatted_name
+      || [c.name?.first_name, c.name?.last_name].filter(Boolean).join(' ')
+      || 'Contato sem nome',
+    celular: normalizeBR(c.phones?.[0]?.wa_id || c.phones?.[0]?.phone || ''),
+    email: c.emails?.[0]?.email ?? null,
+    cargo: c.org?.title ?? null,
+    empresa: c.org?.company ?? null,
+  })).filter((c) => c.nome);
+}
+
 async function handleMessage(m, contato) {
   const phone = normalizeBR(m.from);
   const leadId = `wa:${phone}`;
@@ -97,15 +111,32 @@ async function handleMessage(m, contato) {
 
   let text = extractText(m);
   const images = [];
+  let midia = null;          // o descritor leve, que vai na propria mensagem
+  let bytes = null;          // o arquivo, que vai para a tabela de midias
+  let contatos = [];
+
   try {
     if (m.type === 'audio' || m.type === 'voice') {
-      const { buffer } = await downloadMedia(m.audio?.id || m.voice?.id);
-      const t = await transcribeAudio(buffer, 'audio.ogg');
+      const dados = await downloadMedia(m.audio?.id || m.voice?.id);
+      const t = await transcribeAudio(dados.buffer, 'audio.ogg');
       text = `[áudio transcrito] ${t}`;
       log(`🎙️  áudio de ${formatBR(phone)}: "${t}"`);
+      // A transcricao fica no texto, que e o que serve para vender e para a IA ler. O audio
+      // fica guardado para quem quiser ouvir o tom — as vezes e nele que esta a urgencia.
+      midia = { tipo: 'audio', transcricao: t, segundos: m.audio?.voice ? null : null };
+      bytes = { tipo: 'audio', mime: dados.mime || 'audio/ogg', buffer: dados.buffer };
     } else if (m.type === 'image') {
-      const { buffer, mime } = await downloadMedia(m.image.id);
-      images.push(`data:${mime || 'image/jpeg'};base64,${buffer.toString('base64')}`);
+      const dados = await downloadMedia(m.image.id);
+      images.push(`data:${dados.mime || 'image/jpeg'};base64,${dados.buffer.toString('base64')}`);
+      midia = { tipo: 'imagem', legenda: m.image?.caption ?? null };
+      bytes = { tipo: 'imagem', mime: dados.mime || 'image/jpeg', buffer: dados.buffer };
+    } else if (m.type === 'document') {
+      const dados = await downloadMedia(m.document.id);
+      midia = { tipo: 'documento', nome: m.document?.filename ?? 'arquivo' };
+      bytes = { tipo: 'documento', mime: dados.mime, nomeArquivo: m.document?.filename, buffer: dados.buffer };
+    } else if (m.type === 'contacts') {
+      contatos = lerContatos(m);
+      midia = { tipo: 'contato', contatos };
     }
   } catch (err) {
     log('⚠️  falha ao baixar mídia:', err.message);
@@ -113,7 +144,21 @@ async function handleMessage(m, contato) {
   }
   if (!text) return;
 
-  await onIncoming({ leadId, to: m.from, phone, pushName: contato?.profile?.name, text, images, raw: m });
+  await onIncoming({
+    leadId, to: m.from, phone, pushName: contato?.profile?.name, text, images, raw: m, midia,
+    // Roda com o id da mensagem recem-criada: e nela que os bytes e o contato se penduram.
+    aoGravar: async (mensagemId) => {
+      if (bytes) await guardarMidia(mensagemId, bytes);
+      if (contatos.length) {
+        const entidadeId = await entidadeDaConversa(leadId);
+        for (const c of contatos) {
+          const id = await guardarContato(entidadeId, leadId, c);
+          if (id) log(`👤 contato "${c.nome}" guardado na ficha do cliente`);
+          else if (entidadeId == null) log(`👤 contato "${c.nome}" recebido, mas a conversa ainda não tem cadastro`);
+        }
+      }
+    },
+  });
 }
 
 // Mensagens enviadas pela equipe pelo app do WhatsApp Business (echo) → humano assumiu o chat.

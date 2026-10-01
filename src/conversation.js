@@ -51,10 +51,12 @@ export function createConversation(channel, log = console.log) {
    * Registra a mensagem do lead e agenda a resposta (aguardando mensagens picadas).
    * @param {{ leadId, to, phone, pushName, text, images?, raw? }} msg
    */
-  async function onIncoming({ leadId, to, phone, pushName, text, images = [], raw }) {
+  async function onIncoming({ leadId, to, phone, pushName, text, images = [], raw, midia, aoGravar }) {
     const lead = await upsertLead(leadId, { phone, pushName });
     log(`📩 ${lead.push_name || formatBR(phone)}: ${text}`);
-    await addMessage(leadId, 'user', text);
+    // O id da mensagem volta para quem chamou poder anexar os bytes e o contato a ela.
+    const mensagemId = await addMessage(leadId, 'user', text, midia ?? null);
+    if (aoGravar) await aoGravar(mensagemId).catch(() => {});
 
     if (lead.paused_until > Date.now()) {
       log(`⏸️  ${formatBR(phone)} em atendimento humano — bot não responde`);
