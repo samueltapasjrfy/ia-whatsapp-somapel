@@ -288,7 +288,7 @@ export async function registrarStatusDeEntrega(wamid, status, erro = null) {
  * So o envio mais recente daquele telefone, e so dentro de sete dias: resposta de hoje a
  * uma campanha de marco nao e resposta, e contar como se fosse inflaria o funil.
  */
-export async function registrarRespostaDeCampanha(telefones, texto, interesse) {
+export async function registrarRespostaDeCampanha(telefones, texto, interesse, leadId) {
   // **Lista de variantes, nao um numero.** O WhatsApp entrega o remetente sem o nono digito
   // em conta antiga (553197737057), e a campanha saiu para o numero com ele
   // (5531997737057). Com igualdade exata, nenhuma resposta casava — o funil do primeiro
@@ -302,10 +302,29 @@ export async function registrarRespostaDeCampanha(telefones, texto, interesse) {
                    WHERE telefone = ANY($1::text[]) AND enviado_em IS NOT NULL
                      AND enviado_em > now() - interval '7 days'
                    ORDER BY enviado_em DESC LIMIT 1)
-      RETURNING id, disparo_id`,
+      RETURNING id, disparo_id, base_id, telefone`,
     [lista, texto.slice(0, 500), interesse],
   );
-  return rows[0] ?? null;
+  const envio = rows[0] ?? null;
+
+  // Quem responde a uma campanha ja esta identificado: a mensagem saiu para um cadastro.
+  // Ligar a conversa a ele aqui e o que faz o botao "abrir o cadastro" existir no chat — sem
+  // isto, so apareceria depois de a Sofia pedir o CNPJ, que numa resposta de campanha ela
+  // nem precisa pedir.
+  //
+  // `coalesce` para nao sobrescrever uma identificacao que ja exista: as duas sao certas, e
+  // a primeira ja esta na tela.
+  if (envio && leadId) {
+    await q(
+      `INSERT INTO crm.conversas (id, telefone, entidade_id, criada_em, atualizada_em)
+       VALUES ($1, $2, $3, now(), now())
+       ON CONFLICT (id) DO UPDATE
+          SET entidade_id = coalesce(crm.conversas.entidade_id, EXCLUDED.entidade_id),
+              atualizada_em = now()`,
+      [leadId, envio.telefone, envio.base_id],
+    );
+  }
+  return envio;
 }
 
 /** Quem pediu para parar nunca mais entra em lista — a supressao sobrevive as cargas do ETL. */

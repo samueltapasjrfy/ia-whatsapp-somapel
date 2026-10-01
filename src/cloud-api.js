@@ -332,12 +332,46 @@ setInterval(() => { despacharCampanha().catch((e) => log('⚠️  campanha:', e.
  * livre fica INDEFINIDO de proposito — quem decide se aquilo e interesse e a Sofia, na
  * qualificacao, ou o vendedor lendo. Chutar aqui encheria o funil de falso positivo.
  */
+/** Robo de atendimento do outro lado. Nao e resposta de gente — e so o aparelho confirmando. */
+const AUTOMATICA = /atendimento autom|mensagem autom|resposta autom|agradece (o )?seu contato|agradece o contato|seja bem.?vindo|em breve (um|uma) (atendente|consultor)|nosso hor.rio de (atendimento|funcionamento)|retornaremos (o|seu) contato|deixe sua mensagem/i;
+
+/**
+ * Classifica a resposta a uma campanha pelo que a pessoa tocou ou escreveu.
+ *
+ * Os botoes do modelo sao o sinal limpo — chegam como texto exato e nao deixam duvida. O
+ * texto livre fica INDEFINIDO de proposito: quem decide se aquilo e interesse e a Sofia, na
+ * qualificacao, ou o vendedor lendo. Chutar aqui enche o funil de falso positivo, e o custo
+ * e um vendedor ligando para quem nunca respondeu.
+ *
+ * O primeiro disparo real ensinou duas coisas. Um "ATENDIMENTO AUTOMATICO: obrigado por nos
+ * contactar, envie seu orcamento..." foi classificado como INTERESSADO porque a palavra
+ * aparecia no meio do texto do robo — por isso o teste de interesse agora exige mensagem
+ * curta. E "favor nao me enviar spam" passou batido: e pedido de saida como qualquer outro,
+ * so que dito com raiva.
+ */
 function lerInteresse(texto) {
   const t = (texto || '').toLowerCase().trim();
-  if (/parar de receber|descadastr|nao quero mais|não quero mais|sair/.test(t)) return 'DESCADASTRO';
-  if (/quero (uma )?cota|quero o pre|me manda o pre|or.amento/.test(t)) return 'INTERESSADO';
-  if (/volta a falar|depois|mais pra frente|mês que vem|mes que vem/.test(t)) return 'DEPOIS';
-  if (/^(hoje n|n.o, obrigad|nao obrigad|sem interesse|n.o preciso)/.test(t)) return 'SEM_INTERESSE';
+  if (!t) return 'INDEFINIDO';
+
+  // Sai antes de tudo: o robo do outro lado pode conter qualquer palavra-chave.
+  if (AUTOMATICA.test(t)) return 'AUTOMATICA';
+
+  if (/parar de receber|descadastr|n[aã]o (quero|desejo) (mais|receber)|n[aã]o me envie|nao me envie|me (tire|tira|remove|remova)|spam|^sair$/.test(t)) {
+    return 'DESCADASTRO';
+  }
+  // Curto de proposito: a frase so conta como interesse quando ela E a resposta, nao quando
+  // a palavra aparece perdida dentro de um texto longo.
+  const curto = t.length <= 90;
+  if (curto && /quero (uma )?cota|quero o pre|me (manda|passa) o pre|^or[cç]amento|preciso de or[cç]amento/.test(t)) {
+    return 'INTERESSADO';
+  }
+  if (curto && /volta a falar|mais pra frente|m[eê]s que vem|me chama depois/.test(t)) return 'DEPOIS';
+  if (curto && /^(hoje n|n[aã]o, obrigad|nao obrigad|sem interesse|n[aã]o preciso)/.test(t)) {
+    return 'SEM_INTERESSE';
+  }
+  if (curto && /outro fornecedor|j[aá] (comprei|compramos)|j[aá] temos fornecedor/.test(t)) {
+    return 'SEM_INTERESSE';
+  }
   return 'INDEFINIDO';
 }
 
@@ -350,7 +384,9 @@ function lerInteresse(texto) {
 async function registrarRespostaDeDisparo(phone, texto) {
   const interesse = lerInteresse(texto);
   try {
-    const envio = await registrarRespostaDeCampanha(brVariants(phone), texto, interesse);
+    const envio = await registrarRespostaDeCampanha(
+      brVariants(phone), texto, interesse, `wa:${phone}`,
+    );
     if (!envio) return;
     log(`📊 resposta de campanha (${interesse.toLowerCase()}): ${formatBR(phone)}`);
     if (interesse === 'DESCADASTRO') {
