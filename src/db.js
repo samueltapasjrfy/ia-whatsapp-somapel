@@ -373,3 +373,36 @@ export async function registrarAtendimentoDeCampanha(cliente, envioId) {
     [envioId, usuarioId],
   );
 }
+
+/**
+ * A mensagem de campanha entra na conversa, como qualquer outra que a gente mandou.
+ *
+ * Sem isto o chat mostrava so a resposta do cliente — "ainda tenho, vou ver se preciso" —
+ * sem o que a gente perguntou. Quem atende lia metade do dialogo e tinha que adivinhar a
+ * outra. A campanha e uma mensagem nossa no WhatsApp: o lugar dela e no fio da conversa.
+ *
+ * Cria a conversa se ainda nao existir e ja a liga ao cadastro: a mensagem saiu para um
+ * cliente conhecido, entao o botao "abrir o cadastro" funciona desde o primeiro balao.
+ */
+export async function registrarMensagemDeCampanha(cliente, envioId, leadId) {
+  const { rows } = await cliente.query(
+    `SELECT e.telefone, e.texto, e.base_id FROM crm.disparo_envios e WHERE e.id = $1`,
+    [envioId],
+  );
+  const e = rows[0];
+  if (!e) return;
+
+  await cliente.query(
+    `INSERT INTO crm.conversas (id, telefone, origem, entidade_id, criada_em, atualizada_em)
+     VALUES ($1, $2, 'outbound', $3, now(), now())
+     ON CONFLICT (id) DO UPDATE
+        SET entidade_id = coalesce(crm.conversas.entidade_id, EXCLUDED.entidade_id),
+            atualizada_em = now()`,
+    [leadId, e.telefone, e.base_id],
+  );
+  await cliente.query(
+    `INSERT INTO crm.mensagens_whatsapp (conversa_id, papel, conteudo, enviada_em)
+     VALUES ($1, 'campanha', $2, now())`,
+    [leadId, e.texto],
+  );
+}

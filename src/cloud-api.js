@@ -10,8 +10,8 @@ import { createConversation } from './conversation.js';
 import { fecharLote, marcarEnviada, pegarEnviosPendentes, updateLead } from './db.js';
 import {
   fecharDisparosConcluidos, fecharLoteCampanha, marcarCampanhaEnviada, pegarCampanhaPendente,
-  registrarAtendimentoDeCampanha, registrarRespostaDeCampanha, registrarStatusDeEntrega,
-  suprimirTelefone,
+  registrarAtendimentoDeCampanha, registrarMensagemDeCampanha, registrarRespostaDeCampanha,
+  registrarStatusDeEntrega, suprimirTelefone,
 } from './db.js';
 import { addMessage, getLead } from './db.js';
 
@@ -307,6 +307,8 @@ async function despacharCampanha() {
       // Na mesma transacao do envio: ou as duas coisas existem, ou nenhuma. Ficha sem a
       // mensagem que saiu e pior que nada — e o vendedor liga sem saber.
       await registrarAtendimentoDeCampanha(cliente, e.id);
+      // E no fio da conversa: quem responder amanha tem que aparecer com a pergunta junto.
+      await registrarMensagemDeCampanha(cliente, e.id, `wa:${normalizeBR(e.telefone)}`);
       log(`📣 campanha → ${formatBR(e.telefone)} (${e.nome})`);
     } catch (err) {
       // Marca a falha na propria linha em vez de insistir: numero que nao tem WhatsApp nao
