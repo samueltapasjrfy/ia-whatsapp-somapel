@@ -30,6 +30,19 @@ const pool = new pg.Pool({
   ssl: config.databaseUrl?.includes('rds.amazonaws.com') ? { rejectUnauthorized: false } : undefined,
 });
 
+/**
+ * Toda conexao fala UTC.
+ *
+ * O RDS vem com o fuso da sessao em America/Sao_Paulo, e as colunas de data sao
+ * `timestamp without time zone`. Com isso, `now()` gravava a hora **local** — enquanto o
+ * resto do sistema (Prisma, na API) grava UTC e a tela le tudo como UTC. O efeito era que
+ * conversa, mensagem e disparo apareciam tres horas no passado, e so eles.
+ *
+ * Fica no `connect` e nao na string de conexao para valer tambem nas conexoes que o pool
+ * abre depois, que sao a maioria.
+ */
+pool.on('connect', (c) => { c.query("SET TIME ZONE 'UTC'").catch(() => {}); });
+
 pool.on('error', (err) => {
   // Conexão ociosa derrubada pelo servidor não é motivo para matar o processo: o pool abre
   // outra na próxima consulta. Sem este handler, o Node encerra o agente.
