@@ -200,3 +200,115 @@ export async function fecharLote(cliente, ok = true) {
 export async function encerrar() {
   await pool.end();
 }
+
+/* ───────────────────────── disparos de campanha ───────────────────────── */
+
+/**
+ * Pega um lote de envios de campanha prontos para sair.
+ *
+ * `FOR UPDATE SKIP LOCKED` pelo mesmo motivo da fila de mensagens: dobrar o numero de
+ * agentes amanha nao pode mandar a mesma mensagem duas vezes. E so de disparo com status
+ * ENVIANDO — enquanto a pessoa nao aperta o botao na tela, as linhas ficam paradas.
+ */
+export async function pegarCampanhaPendente(limite = 10) {
+  const cliente = await pool.connect();
+  try {
+    await cliente.query('BEGIN');
+    const { rows } = await cliente.query(
+      `SELECT e.id, e.telefone, e.texto, e.nome, e.base_id, e.disparo_id,
+              t.nome AS template_nome, t.idioma, e.variaveis
+         FROM crm.disparo_envios e
+         JOIN crm.disparos d  ON d.id = e.disparo_id
+         JOIN crm.templates t ON t.id = d.template_id
+        WHERE e.status = 'PENDENTE' AND d.status = 'ENVIANDO'
+        ORDER BY e.id
+        LIMIT $1
+          FOR UPDATE OF e SKIP LOCKED`,
+      [limite],
+    );
+    return { cliente, rows };
+  } catch (err) {
+    cliente.query('ROLLBACK').catch(() => {});
+    cliente.release();
+    throw err;
+  }
+}
+
+export async function marcarCampanhaEnviada(cliente, id, wamid, erro = null) {
+  await cliente.query(
+    `UPDATE crm.disparo_envios
+        SET status = $3, wamid = $2, enviado_em = CASE WHEN $3 = 'ENVIADO' THEN now() END, erro = $4
+      WHERE id = $1`,
+    [id, wamid, erro ? 'FALHOU' : 'ENVIADO', erro],
+  );
+}
+
+export async function fecharLoteCampanha(cliente, ok) {
+  try { await cliente.query(ok ? 'COMMIT' : 'ROLLBACK'); } finally { cliente.release(); }
+}
+
+/** Fecha o disparo quando nao sobrou nada pendente. */
+export async function fecharDisparosConcluidos() {
+  await q(
+    `UPDATE crm.disparos d SET status = 'CONCLUIDO', concluido_em = now()
+      WHERE d.status = 'ENVIANDO'
+        AND NOT EXISTS (SELECT 1 FROM crm.disparo_envios e
+                         WHERE e.disparo_id = d.id AND e.status = 'PENDENTE')`,
+  );
+}
+
+/**
+ * O relatorio de entrega da Meta, casado pelo `wamid`.
+ *
+ * Pelo telefone nao daria: a mesma pessoa recebe de novo no disparo seguinte, e o status
+ * de hoje marcaria a mensagem do mes passado.
+ */
+export async function registrarStatusDeEntrega(wamid, status, erro = null) {
+  const coluna = { delivered: 'entregue_em', read: 'lido_em' }[status];
+  if (status === 'failed') {
+    await q(`UPDATE crm.disparo_envios SET status='FALHOU', erro=$2 WHERE wamid=$1`, [wamid, erro]);
+    return;
+  }
+  if (!coluna) return;
+  // `coalesce` para o primeiro carimbo vencer: a Meta reenvia status, e sobrescrever faria
+  // a hora da entrega andar para frente sozinha.
+  await q(
+    `UPDATE crm.disparo_envios
+        SET ${coluna} = coalesce(${coluna}, now()),
+            status = CASE WHEN $2 = 'read' THEN 'LIDO'
+                          WHEN status IN ('ENVIADO') THEN 'ENTREGUE' ELSE status END
+      WHERE wamid = $1`,
+    [wamid, status],
+  );
+}
+
+/**
+ * Liga a resposta de alguem ao disparo que a provocou.
+ *
+ * So o envio mais recente daquele telefone, e so dentro de sete dias: resposta de hoje a
+ * uma campanha de marco nao e resposta, e contar como se fosse inflaria o funil.
+ */
+export async function registrarRespostaDeCampanha(telefone, texto, interesse) {
+  const { rows } = await q(
+    `UPDATE crm.disparo_envios SET respondido_em = coalesce(respondido_em, now()),
+            resposta = coalesce(resposta, $2),
+            interesse = coalesce($3, interesse)
+      WHERE id = (SELECT id FROM crm.disparo_envios
+                   WHERE telefone = $1 AND enviado_em IS NOT NULL
+                     AND enviado_em > now() - interval '7 days'
+                   ORDER BY enviado_em DESC LIMIT 1)
+      RETURNING id, disparo_id`,
+    [telefone, texto.slice(0, 500), interesse],
+  );
+  return rows[0] ?? null;
+}
+
+/** Quem pediu para parar nunca mais entra em lista — a supressao sobrevive as cargas do ETL. */
+export async function suprimirTelefone(telefone, motivo = 'OPT_OUT') {
+  await q(
+    `INSERT INTO public.supressao (tipo, valor, motivo, observacao)
+     VALUES ('TELEFONE', $1, $2, 'pedido pelo proprio cliente no WhatsApp')
+     ON CONFLICT (tipo, valor) DO NOTHING`,
+    [telefone, motivo],
+  );
+}

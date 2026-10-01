@@ -8,6 +8,10 @@ import { transcribeAudio } from './agent.js';
 import { config, formatBR, normalizeBR } from './config.js';
 import { createConversation } from './conversation.js';
 import { fecharLote, marcarEnviada, pegarEnviosPendentes, updateLead } from './db.js';
+import {
+  fecharDisparosConcluidos, fecharLoteCampanha, marcarCampanhaEnviada, pegarCampanhaPendente,
+  registrarRespostaDeCampanha, registrarStatusDeEntrega, suprimirTelefone,
+} from './db.js';
 import { addMessage, getLead } from './db.js';
 
 const log = (...a) => console.log(new Date().toLocaleTimeString('pt-BR'), ...a);
@@ -108,6 +112,10 @@ async function handleMessage(m, contato) {
   }
   if (!text) return;
 
+  // Antes de a IA responder: se esta mensagem e resposta a uma campanha, o funil precisa
+  // saber, e um pedido de "parar de receber" tem que valer hoje, nao depois do atendimento.
+  await registrarRespostaDeDisparo(phone, text);
+
   await onIncoming({ leadId, to: m.from, phone, pushName: contato?.profile?.name, text, images, raw: m });
 }
 
@@ -163,8 +171,17 @@ createServer((req, res) => {
               }
               await handleMessage(m, value.contacts?.find((c) => c.wa_id === m.from));
             }
+            // O relatorio de entrega da Meta. Antes so o erro virava log e nada era
+            // guardado — sem isto o funil da campanha nao sai do "enviadas".
             for (const s of value?.statuses || []) {
-              if (s.status === 'failed') log(`⚠️  envio falhou para ${formatBR(s.recipient_id)}: ${s.errors?.[0]?.title || ''} — ${s.errors?.[0]?.error_data?.details || ''}`);
+              const erro = s.errors?.[0];
+              if (s.status === 'failed') {
+                log(`⚠️  envio falhou para ${formatBR(s.recipient_id)}: ${erro?.title || ''} — ${erro?.error_data?.details || ''}`);
+              }
+              await registrarStatusDeEntrega(
+                s.id, s.status,
+                erro ? `${erro.title || ''} ${erro.error_data?.details || ''}`.trim().slice(0, 300) : null,
+              ).catch((e) => log('⚠️  nao consegui gravar o status de entrega:', e.message));
             }
           }
         }
@@ -231,3 +248,108 @@ async function despacharDoCrm() {
 // A cada 2 segundos. Curto para o balao sair quase junto com o clique, e barato: uma consulta
 // indexada que quase sempre volta vazia. `unref` para o laco nao segurar o processo de pe.
 setInterval(() => { despacharDoCrm().catch((e) => log('⚠️  despacho:', e.message)); }, 2000).unref();
+
+/* ─────────────────────────── disparos de campanha ─────────────────────────── */
+
+/**
+ * Entrega os disparos montados no CRM.
+ *
+ * A mensagem sai como **template**, nao como texto: fora da janela de 24h a Meta so aceita
+ * modelo aprovado, e campanha por definicao fala com quem nao escreveu primeiro.
+ *
+ * O ritmo e deliberadamente lento — poucos por vez, com pausa entre um e outro. Centenas de
+ * mensagens identicas saindo no mesmo segundo e o padrao que a Meta associa a spam, e o
+ * preco disso e a qualidade do numero, nao o disparo.
+ */
+const CAMPANHA_LOTE = 5;
+const CAMPANHA_PAUSA_MS = 1500;
+
+async function enviarTemplate(to, nomeDoTemplate, idioma, variaveis) {
+  const valores = Object.keys(variaveis ?? {})
+    .sort((a, b) => Number(a) - Number(b))
+    .map((k) => ({ type: 'text', text: String(variaveis[k] ?? '') }));
+  const resposta = await sendMessage({
+    to,
+    type: 'template',
+    template: {
+      name: nomeDoTemplate,
+      language: { code: idioma || 'pt_BR' },
+      ...(valores.length ? { components: [{ type: 'body', parameters: valores }] } : {}),
+    },
+  });
+  return resposta?.messages?.[0]?.id ?? null;
+}
+
+async function despacharCampanha() {
+  let lote;
+  try {
+    lote = await pegarCampanhaPendente(CAMPANHA_LOTE);
+  } catch (err) {
+    log('⚠️  não consegui ler a fila de campanha:', err.message);
+    return;
+  }
+  const { cliente, rows } = lote;
+  if (!rows.length) {
+    await fecharLoteCampanha(cliente, true);
+    await fecharDisparosConcluidos().catch(() => {});
+    return;
+  }
+
+  for (const e of rows) {
+    try {
+      const wamid = await enviarTemplate(e.telefone, e.template_nome, e.idioma, e.variaveis);
+      await marcarCampanhaEnviada(cliente, e.id, wamid);
+      log(`📣 campanha → ${formatBR(e.telefone)} (${e.nome})`);
+    } catch (err) {
+      // Marca a falha na propria linha em vez de insistir: numero que nao tem WhatsApp nao
+      // melhora na segunda tentativa, e a tela precisa mostrar que nao foi.
+      await marcarCampanhaEnviada(cliente, e.id, null, err.message.slice(0, 300));
+      log(`❌ campanha falhou para ${formatBR(e.telefone)}: ${err.message}`);
+    }
+    await sleep(CAMPANHA_PAUSA_MS);
+  }
+  await fecharLoteCampanha(cliente, true);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// A cada 10 segundos. Nao precisa ser rapido: campanha nao e conversa, e o ritmo lento e
+// proposital. `unref` para o laco nao segurar o processo de pe.
+setInterval(() => { despacharCampanha().catch((e) => log('⚠️  campanha:', e.message)); }, 10_000).unref();
+
+/**
+ * Classifica a resposta a uma campanha pelo que a pessoa tocou ou escreveu.
+ *
+ * Os botoes do modelo sao o sinal limpo: "Quero uma cotacao" nao deixa duvida. O texto
+ * livre fica INDEFINIDO de proposito — quem decide se aquilo e interesse e a Sofia, na
+ * qualificacao, ou o vendedor lendo. Chutar aqui encheria o funil de falso positivo.
+ */
+function lerInteresse(texto) {
+  const t = (texto || '').toLowerCase().trim();
+  if (/parar de receber|descadastr|nao quero mais|não quero mais|sair/.test(t)) return 'DESCADASTRO';
+  if (/quero (uma )?cota|quero o pre|me manda o pre|or.amento/.test(t)) return 'INTERESSADO';
+  if (/volta a falar|depois|mais pra frente|mês que vem|mes que vem/.test(t)) return 'DEPOIS';
+  if (/^(hoje n|n.o, obrigad|nao obrigad|sem interesse|n.o preciso)/.test(t)) return 'SEM_INTERESSE';
+  return 'INDEFINIDO';
+}
+
+/**
+ * Liga a resposta de alguem a campanha que a provocou, e respeita o pedido de parar.
+ *
+ * Roda antes da IA responder: se a pessoa pediu para sair, ela sai da lista hoje — a
+ * supressao vale para todas as campanhas seguintes e sobrevive as cargas do ETL.
+ */
+async function registrarRespostaDeDisparo(phone, texto) {
+  const interesse = lerInteresse(texto);
+  try {
+    const envio = await registrarRespostaDeCampanha(phone, texto, interesse);
+    if (!envio) return;
+    log(`📊 resposta de campanha (${interesse.toLowerCase()}): ${formatBR(phone)}`);
+    if (interesse === 'DESCADASTRO') {
+      await suprimirTelefone(phone);
+      log(`🚫 ${formatBR(phone)} pediu para sair — não entra em campanha nenhuma a partir de agora`);
+    }
+  } catch (err) {
+    log('⚠️  não consegui registrar a resposta de campanha:', err.message);
+  }
+}
