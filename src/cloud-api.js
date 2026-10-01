@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { basename } from 'node:path';
 import { transcribeAudio } from './agent.js';
-import { config, formatBR, normalizeBR } from './config.js';
+import { brVariants, config, formatBR, normalizeBR } from './config.js';
 import { createConversation } from './conversation.js';
 import { fecharLote, marcarEnviada, pegarEnviosPendentes, updateLead } from './db.js';
 import {
@@ -350,11 +350,11 @@ function lerInteresse(texto) {
 async function registrarRespostaDeDisparo(phone, texto) {
   const interesse = lerInteresse(texto);
   try {
-    const envio = await registrarRespostaDeCampanha(phone, texto, interesse);
+    const envio = await registrarRespostaDeCampanha(brVariants(phone), texto, interesse);
     if (!envio) return;
     log(`📊 resposta de campanha (${interesse.toLowerCase()}): ${formatBR(phone)}`);
     if (interesse === 'DESCADASTRO') {
-      await suprimirTelefone(phone);
+      for (const v of brVariants(phone)) await suprimirTelefone(v);
       log(`🚫 ${formatBR(phone)} pediu para sair — não entra em campanha nenhuma a partir de agora`);
     }
   } catch (err) {

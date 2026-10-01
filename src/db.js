@@ -288,17 +288,22 @@ export async function registrarStatusDeEntrega(wamid, status, erro = null) {
  * So o envio mais recente daquele telefone, e so dentro de sete dias: resposta de hoje a
  * uma campanha de marco nao e resposta, e contar como se fosse inflaria o funil.
  */
-export async function registrarRespostaDeCampanha(telefone, texto, interesse) {
+export async function registrarRespostaDeCampanha(telefones, texto, interesse) {
+  // **Lista de variantes, nao um numero.** O WhatsApp entrega o remetente sem o nono digito
+  // em conta antiga (553197737057), e a campanha saiu para o numero com ele
+  // (5531997737057). Com igualdade exata, nenhuma resposta casava — o funil do primeiro
+  // disparo real ficou em zero com gente ja respondendo. `brVariants` gera as duas formas.
+  const lista = Array.isArray(telefones) ? telefones : [telefones];
   const { rows } = await q(
     `UPDATE crm.disparo_envios SET respondido_em = coalesce(respondido_em, now()),
             resposta = coalesce(resposta, $2),
             interesse = coalesce($3, interesse)
       WHERE id = (SELECT id FROM crm.disparo_envios
-                   WHERE telefone = $1 AND enviado_em IS NOT NULL
+                   WHERE telefone = ANY($1::text[]) AND enviado_em IS NOT NULL
                      AND enviado_em > now() - interval '7 days'
                    ORDER BY enviado_em DESC LIMIT 1)
       RETURNING id, disparo_id`,
-    [telefone, texto.slice(0, 500), interesse],
+    [lista, texto.slice(0, 500), interesse],
   );
   return rows[0] ?? null;
 }
