@@ -10,7 +10,8 @@ import { createConversation } from './conversation.js';
 import { fecharLote, marcarEnviada, pegarEnviosPendentes, updateLead } from './db.js';
 import {
   fecharDisparosConcluidos, fecharLoteCampanha, marcarCampanhaEnviada, pegarCampanhaPendente,
-  registrarRespostaDeCampanha, registrarStatusDeEntrega, suprimirTelefone,
+  registrarAtendimentoDeCampanha, registrarRespostaDeCampanha, registrarStatusDeEntrega,
+  suprimirTelefone,
 } from './db.js';
 import { addMessage, getLead } from './db.js';
 
@@ -112,10 +113,6 @@ async function handleMessage(m, contato) {
   }
   if (!text) return;
 
-  // Antes de a IA responder: se esta mensagem e resposta a uma campanha, o funil precisa
-  // saber, e um pedido de "parar de receber" tem que valer hoje, nao depois do atendimento.
-  await registrarRespostaDeDisparo(phone, text);
-
   await onIncoming({ leadId, to: m.from, phone, pushName: contato?.profile?.name, text, images, raw: m });
 }
 
@@ -165,6 +162,14 @@ createServer((req, res) => {
             for (const m of value?.messages || []) {
               const phone = normalizeBR(m.from);
               if (m.from === config.waPhone) { await handleEcho(m); continue; }
+
+              // **Antes do filtro de números liberados, de propósito.** Registrar não é
+              // responder: com REPLY_TO_ALL desligado a Sofia fica calada, mas a campanha
+              // disparou para gente de fora da lista e a resposta dela é o funil inteiro.
+              // Amarrado ao `isAllowed`, um disparo para 240 pessoas mostraria zero
+              // respostas — e um "parar de receber" seria ignorado, que é pior.
+              await registrarRespostaDeDisparo(phone, extractText(m));
+
               if (!isAllowed(phone)) {
                 log(`🙈 ignorando ${formatBR(phone)} — fora de ALLOWED_NUMBERS`);
                 continue;
@@ -299,6 +304,9 @@ async function despacharCampanha() {
     try {
       const wamid = await enviarTemplate(e.telefone, e.template_nome, e.idioma, e.variaveis);
       await marcarCampanhaEnviada(cliente, e.id, wamid);
+      // Na mesma transacao do envio: ou as duas coisas existem, ou nenhuma. Ficha sem a
+      // mensagem que saiu e pior que nada — e o vendedor liga sem saber.
+      await registrarAtendimentoDeCampanha(cliente, e.id);
       log(`📣 campanha → ${formatBR(e.telefone)} (${e.nome})`);
     } catch (err) {
       // Marca a falha na propria linha em vez de insistir: numero que nao tem WhatsApp nao

@@ -312,3 +312,40 @@ export async function suprimirTelefone(telefone, motivo = 'OPT_OUT') {
     [telefone, motivo],
   );
 }
+
+/** O usuario do CRM em nome de quem a IA registra. Resolvido uma vez e guardado. */
+let idDoUsuarioDaIa = null;
+async function usuarioDaIa() {
+  if (idDoUsuarioDaIa) return idDoUsuarioDaIa;
+  const { rows } = await q('SELECT id FROM crm.usuarios WHERE email = $1', [config.crmEmail]);
+  idDoUsuarioDaIa = rows[0]?.id ?? null;
+  return idDoUsuarioDaIa;
+}
+
+/**
+ * A mensagem de campanha vira atendimento na ficha do cliente.
+ *
+ * Sem isto o vendedor abre a ficha no dia seguinte, liga, e descobre pelo cliente que a
+ * empresa ja tinha mandado mensagem — ou pior, nao descobre.
+ *
+ * Fica no nome do **usuario da IA**, nao de quem montou a campanha. Um disparo de 240
+ * somaria 240 atendimentos a conta de uma pessoa so e destruiria a meta semanal que o time
+ * acompanha. Campanha e automacao; atendimento de vendedor e outra coisa.
+ *
+ * `MENSAGEM_ENVIADA` e o resultado certo pelo proprio glossario do CRM: conta tentativa,
+ * mas nao e o mesmo que ter conversado.
+ */
+export async function registrarAtendimentoDeCampanha(cliente, envioId) {
+  const usuarioId = await usuarioDaIa();
+  if (!usuarioId) return;
+  await cliente.query(
+    `INSERT INTO crm.interacoes (id, base_id, origem, codigo, loja, usuario_id, tipo, resultado, observacao, criada_em)
+     SELECT gen_random_uuid()::text, b.id, b.origem, b.codigo, b.loja, $2, 'WHATSAPP', 'MENSAGEM_ENVIADA',
+            left('Campanha "' || d.nome || '": ' || e.texto, 2000), now()
+       FROM crm.disparo_envios e
+       JOIN crm.disparos d       ON d.id = e.disparo_id
+       JOIN public.v_entidades b ON b.id = e.base_id
+      WHERE e.id = $1`,
+    [envioId, usuarioId],
+  );
+}
