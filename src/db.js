@@ -311,9 +311,18 @@ export async function registrarRespostaDeCampanha(telefones, texto, interesse, l
   // disparo real ficou em zero com gente ja respondendo. `brVariants` gera as duas formas.
   const lista = Array.isArray(telefones) ? telefones : [telefones];
   const { rows } = await q(
+    // Mensagem vaga nunca rebaixa um sinal claro. A Minasilicio tocou em "Quero o preco",
+    // mandou CNPJ e lista de produtos, e depois escreveu "ok" — e o "ok" apagava o interesse,
+    // porque cada mensagem nova reclassificava a conversa inteira. Tres clientes que pediram
+    // preco no primeiro disparo real ficaram como INDEFINIDO assim.
+    //
+    // So INDEFINIDO e AUTOMATICA ficam impedidos de sobrescrever. Mudanca de ideia de verdade
+    // ("hoje nao") e pedido de saida continuam valendo: esses sao sinais, nao ruido.
     `UPDATE crm.disparo_envios SET respondido_em = coalesce(respondido_em, now()),
             resposta = coalesce(resposta, $2),
-            interesse = coalesce($3, interesse)
+            interesse = CASE
+              WHEN $3 IN ('INDEFINIDO', 'AUTOMATICA') AND interesse IS NOT NULL THEN interesse
+              ELSE $3 END
       WHERE id = (SELECT id FROM crm.disparo_envios
                    WHERE telefone = ANY($1::text[]) AND enviado_em IS NOT NULL
                      AND enviado_em > now() - interval '7 days'
