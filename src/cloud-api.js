@@ -282,7 +282,12 @@ async function despacharDoCrm() {
     try {
       await channel.sendText(m.telefone, m.conteudo);
       await marcarEnviada(cliente, m.id);
-      await updateLead(m.conversa_id, { paused_until: Date.now() + config.humanPauseMinutes * 60e3 });
+      // Estende, nunca encurta: o CRM pode ter pausado ate o fim do dia (o vendedor levou o
+      // cliente para o WhatsApp corporativo), e as 3h daqui trariam a IA de volta no meio.
+      const jaPausada = m.pausada_ate ? new Date(m.pausada_ate).getTime() : 0;
+      await updateLead(m.conversa_id, {
+        paused_until: Math.max(jaPausada, Date.now() + config.humanPauseMinutes * 60e3),
+      });
       log(`💬 ${formatBR(m.telefone)} ← (CRM): ${m.conteudo.replace(/\n/g, ' ⏎ ').slice(0, 80)}`);
     } catch (err) {
       // Marca a falha na propria linha em vez de tentar para sempre: mensagem que a Meta

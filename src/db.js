@@ -184,7 +184,7 @@ export async function pegarEnviosPendentes(limite = 20) {
   try {
     await cliente.query('BEGIN');
     const { rows } = await cliente.query(
-      `SELECT m.id, m.conversa_id, m.conteudo, c.telefone
+      `SELECT m.id, m.conversa_id, m.conteudo, c.telefone, c.pausada_ate
          FROM crm.mensagens_whatsapp m
          JOIN crm.conversas c ON c.id = m.conversa_id
         WHERE m.papel = 'humano' AND m.enviada_em IS NULL
