@@ -75,7 +75,7 @@ const chatTools = [
     type: 'function',
     function: {
       name: 'encaminhar_para_consultor',
-      description: `Encaminha o lead para a vendedora ${config.sellerName}: ela recebe no WhatsApp o nome, o número e o resumo do lead e chama o cliente.`,
+      description: 'Encaminha o lead para o time comercial: o time recebe o nome, o número e o resumo do lead e chama o cliente.',
       parameters: {
         type: 'object',
         required: ['motivo', 'urgencia', 'resumo_para_consultor'],
@@ -189,14 +189,14 @@ async function handleTool(leadId, name, args, out) {
       const aquecido = !lead.handed_off_at && !data.nao_e_lead && s.score >= config.handoffScore;
       return {
         ok: true, score: s.score, temperatura: s.temperature,
-        ...(aquecido ? { alerta: `LEAD AQUECIDO (score ≥ ${config.handoffScore}). Se já tiver o nome do cliente e o que ele precisa, chame encaminhar_para_consultor agora e avise que a ${config.sellerName} vai chamar. Se faltar o nome, peça o nome nesta resposta.` } : {}),
+        ...(aquecido ? { alerta: `LEAD AQUECIDO (score ≥ ${config.handoffScore}). Se já tiver o nome do cliente e o que ele precisa, chame encaminhar_para_consultor agora e avise que o nosso time comercial vai chamar. Se faltar o nome, peça o nome nesta resposta.` } : {}),
       };
     }
     case 'encaminhar_para_consultor': {
-      if (lead.handed_off_at) return { ok: true, aviso: `Lead já havia sido encaminhado; ${config.sellerName} já foi notificada.` };
+      if (lead.handed_off_at) return { ok: true, aviso: 'Lead já havia sido encaminhado; o time comercial já foi avisado.' };
       await updateLead(leadId, { stage: 'encaminhado', handed_off_at: Date.now() });
       out.handoff = { ...args, lead: await getLead(leadId) };
-      return { ok: true, mensagem: `${config.sellerName} foi notificada e vai chamar o cliente neste mesmo WhatsApp. Avise o cliente pelo nome dela.` };
+      return { ok: true, mensagem: 'O time comercial foi avisado e vai chamar o cliente. Avise o cliente que o nosso time comercial vai chamar — sem citar nome de pessoa.' };
     }
     case 'enviar_catalogo':
       out.attachments.push({ kind: 'document', path: new URL('../assets/catalogo-somapel.pdf', import.meta.url).pathname, fileName: 'Catálogo Somapel Embalagens.pdf' });
@@ -213,7 +213,7 @@ async function handleTool(leadId, name, args, out) {
         });
         enviados.push(p.nome);
       }
-      if (!enviados.length) return { ok: false, erro: 'Esse produto não tem foto disponível. Diga isso ao cliente e ofereça o catálogo PDF ou que a vendedora envia.' };
+      if (!enviados.length) return { ok: false, erro: 'Esse produto não tem foto disponível. Diga isso ao cliente e ofereça o catálogo PDF ou que o time comercial envia.' };
       return { ok: true, mensagem: `Foto(s) de ${enviados.join(', ')} serão enviadas logo após sua mensagem de texto.` };
     }
     default:

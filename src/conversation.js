@@ -147,7 +147,7 @@ export function createConversation(channel, log = console.log) {
           entidadeId: l.entidade_id,
           conversaId: leadId,
           resultado: 'PROPOSTA_PEDIDA',
-          observacao: `Encaminhado para ${config.sellerName} — ${handoff.motivo.replace(/_/g, ' ')}`
+          observacao: `Encaminhado ao time comercial — ${handoff.motivo.replace(/_/g, ' ')}`
             + ` (urgência ${handoff.urgencia}).\n${handoff.resumo_para_consultor ?? ''}`,
         }, log);
       }
